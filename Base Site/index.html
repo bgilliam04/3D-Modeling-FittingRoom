@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FittingRoom 3D</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="brand">FittingRoom 3D</div>
+    <nav class="site-nav" id="siteNav">
+      <a href="#home">Home</a>
+      <a href="#workflow">How it Works</a>
+      <a href="#collection">Collection</a>
+      <a href="#contact">Contact</a>
+    </nav>
+    <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation">Menu</button>
+  </header>
+
+  <main>
+    <section class="hero" id="home">
+      <div class="hero-copy">
+        <p class="eyebrow">Virtual fitting made easy</p>
+        <h1>Try on outfits in 3D from anywhere.</h1>
+        <p>Try Out Our 3D Fitting Room!</p>
+        <div class="hero-actions">
+          <a class="btn primary" href="#workflow">Start Fitting</a>
+          <a class="btn secondary" href="#collection">View Collection</a>
+        </div>
+      </div>
+      <div class="hero-visual">
+        <div class="visual-card">
+          <div class="visual-label">3D Preview</div>
+          <div class="visual-placeholder">Your model appears here</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="workflow" id="workflow">
+      <div class="section-header">
+        <p class="eyebrow">The flow</p>
+        <h2>See Your Fit!</h2>
+      </div>
+      <div class="workflow-grid">
+        <article class="workflow-step">
+          <span>1</span>
+          <h3>Upload Size Guide</h3>
+          <p>Enter the size guide for the site you got your garment from.</p>
+        </article>
+        <article class="workflow-step">
+          <span>2</span>
+          <h3>Choose an outfit</h3>
+          <p>Insert your possible new garment's photo</p>
+        </article>
+        <article class="workflow-step">
+          <span>3</span>
+          <h3>Preview in 3D</h3>
+          <p>See how the garment moves and fits on your virtual body before checkout.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="collection" id="collection">
+      <div class="section-header">
+        <p class="eyebrow">Our collection</p>
+        <h2>3D-ready styles for every occasion</h2>
+      </div>
+      <div class="collection-grid">
+        <article class="collection-item">
+          <div class="item-image">[Image of a top]</div>
+          <h3>Chic Blouse</h3>
+        </article>
+      </div>
+    </section>
+
+    <section class="lead-form" id="contact">
+      <div class="section-header">
+        <p class="eyebrow">Get started</p>
+        <h2>Reach out with feedback</h2>
+      </div>
+      <form class="contact-form" id="contactForm">
+        <label>
+          Name
+          <input type="text" name="name" placeholder="Your name" required />
+        </label>
+        <label>
+          Email
+          <input type="email" name="email" placeholder="your@email.com" required />
+        </label>
+        <label>
+          Message
+          <textarea name="message" rows="4" placeholder="Give us feedback or contact us here!"></textarea>
+        </label>
+        <button type="submit" class="btn primary">Send Request</button>
+        <p class="form-status" id="formStatus"></p>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>© 2026 FittingRoom 3D. Built for immersive online fitting experiences.</p>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
