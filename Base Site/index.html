@@ -12,6 +12,7 @@
     <nav class="site-nav" id="siteNav">
       <a href="#home">Home</a>
       <a href="#workflow">How it Works</a>
+      <a href="#analyze">Analyze</a>
       <a href="#collection">Collection</a>
       <a href="#contact">Contact</a>
     </nav>
@@ -32,7 +33,7 @@
       <div class="hero-visual">
         <div class="visual-card">
           <div class="visual-label">3D Preview</div>
-          <div class="visual-placeholder">Your model appears here</div>
+          <div id="modelContainer" class="visual-placeholder">Upload a 3D scan to preview it here.</div>
         </div>
       </div>
     </section>
@@ -59,6 +60,41 @@
           <p>See how the garment moves and fits on your virtual body before checkout.</p>
         </article>
       </div>
+    </section>
+
+    <section class="upload-section" id="analyze">
+      <div class="section-header">
+        <p class="eyebrow">Asset upload</p>
+        <h2>Upload your 3D scan, clothing image, and size guide</h2>
+      </div>
+      <div class="upload-grid">
+        <article class="upload-card">
+          <label class="upload-label">
+            3D Scan
+            <input type="file" id="scanUpload" accept=".glb,.gltf,.obj" />
+            <span class="upload-help">Upload a scan file for future preview or modeling.</span>
+          </label>
+        </article>
+        <article class="upload-card">
+          <label class="upload-label">
+            Clothing Image
+            <input type="file" id="clothingUpload" accept="image/png, image/jpeg" />
+            <span class="upload-help">This image is analyzed by the backend.</span>
+          </label>
+        </article>
+        <article class="upload-card">
+          <label class="upload-label">
+            Size Guide Image
+            <input type="file" id="sizeGuideUpload" accept="image/png, image/jpeg" />
+            <span class="upload-help">This image is also sent to the analyzer.</span>
+          </label>
+        </article>
+      </div>
+      <div class="upload-actions">
+        <button type="button" class="btn primary" id="analyzeButton">Analyze Clothing + Size Guide</button>
+        <p class="form-status" id="analyzeStatus"></p>
+      </div>
+      <div class="analysis-results" id="analysisResults"></div>
     </section>
 
     <section class="collection" id="collection">
@@ -102,6 +138,10 @@
     <p>© 2026 FittingRoom 3D. Built for immersive online fitting experiences.</p>
   </footer>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/examples/js/loaders/OBJLoader.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/examples/js/controls/OrbitControls.js"></script>
   <script src="script.js"></script>
 </body>
 </html>

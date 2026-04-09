@@ -246,6 +246,77 @@ p {
   gap: 1.5rem;
 }
 
+.upload-section {
+  padding: 3rem 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.upload-grid {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  margin-bottom: 1.5rem;
+}
+
+.upload-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1.5rem;
+  padding: 1.75rem;
+}
+
+.upload-label {
+  display: grid;
+  gap: 0.75rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.upload-label input {
+  width: 100%;
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 1rem;
+  background: rgba(255,255,255,0.04);
+  color: var(--text);
+}
+
+.upload-help {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.upload-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+  max-width: 640px;
+  margin: 0 auto 1.5rem;
+  align-items: center;
+  justify-content: center;
+}
+
+.analysis-results {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 1.5rem;
+  padding: 1.5rem;
+  color: var(--muted);
+}
+
+.analysis-results h4 {
+  color: var(--text);
+  margin-top: 0;
+}
+
+.analysis-results pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
 .collection-item h3 {
   display: block;
   width: 100%;
