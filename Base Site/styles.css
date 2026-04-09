@@ -240,6 +240,30 @@ p {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+.collection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1.5rem;
+}
+
+.collection-item h3 {
+  display: block;
+  width: 100%;
+  text-align: center;
+  margin: 1rem 0 0 0;
+}
+.collection-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.item-image {
+  display: flex;
+  justify-content: center;
+  width: 25%;
+  height: auto;
+}
 .contact-form {
   display: grid;
   gap: 1rem;
@@ -283,7 +307,7 @@ p {
 }
 
 .item-image img {
-  width: 25%;
+  width: 100%;
   height: auto;
   display: block;
   border-radius: 1.25rem;
