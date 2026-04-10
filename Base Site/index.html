@@ -33,7 +33,14 @@
       <div class="hero-visual">
         <div class="visual-card">
           <div class="visual-label">3D Preview</div>
-          <div id="modelContainer" class="visual-placeholder">Upload a 3D scan to preview it here.</div>
+          <div id="modelContainer" class="visual-placeholder">
+            <div id="previewHint" class="preview-hint"></div>
+            <img id="clothingOverlay" class="clothing-overlay" alt="Clothing overlay" hidden />
+          </div>
+          <div class="size-guide-panel">
+            <h4>Detected Sizes</h4>
+            <div id="sizeButtons" class="size-buttons"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -72,21 +79,21 @@
           <label class="upload-label">
             3D Scan
             <input type="file" id="scanUpload" accept=".glb,.gltf,.obj" />
-            <span class="upload-help">Upload a scan file for future preview or modeling.</span>
+            <span class="upload-help">Allowed file types: .glb, .gltf, .obj.</span>
           </label>
         </article>
         <article class="upload-card">
           <label class="upload-label">
             Clothing Image
-            <input type="file" id="clothingUpload" accept="image/png, image/jpeg" />
-            <span class="upload-help">This image is analyzed by the backend.</span>
+            <input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" />
+            <span class="upload-help">Allowed file types: .png, .jpg, .jpeg.</span>
           </label>
         </article>
         <article class="upload-card">
           <label class="upload-label">
             Size Guide Image
-            <input type="file" id="sizeGuideUpload" accept="image/png, image/jpeg" />
-            <span class="upload-help">This image is also sent to the analyzer.</span>
+            <input type="file" id="sizeGuideUpload" accept=".png,.jpg,.jpeg" />
+            <span class="upload-help">Allowed file types: .png, .jpg, .jpeg.</span>
           </label>
         </article>
       </div>

@@ -39,6 +39,9 @@ const analyzeButton = document.getElementById('analyzeButton');
 const analysisResults = document.getElementById('analysisResults');
 const analyzeStatus = document.getElementById('analyzeStatus');
 const modelContainer = document.getElementById('modelContainer');
+const clothingOverlay = document.getElementById('clothingOverlay');
+const sizeButtons = document.getElementById('sizeButtons');
+const previewHint = document.getElementById('previewHint');
 const BACKEND_URL = 'http://localhost:4000';
 
 let scene = null;
@@ -65,6 +68,13 @@ function initModelViewer() {
 
   modelContainer.innerHTML = '';
   modelContainer.appendChild(renderer.domElement);
+  if (previewHint) {
+    previewHint.hidden = false;
+    modelContainer.appendChild(previewHint);
+  }
+  if (clothingOverlay) {
+    modelContainer.appendChild(clothingOverlay);
+  }
 
   const light = new THREE.DirectionalLight(0xffffff, 1);
   light.position.set(5, 10, 7);
@@ -114,6 +124,67 @@ function fitModelToView(object) {
   controls.update();
 }
 
+async function uploadScanFileToBackend(file) {
+  const formData = new FormData();
+  formData.append('model', file);
+
+  const response = await fetch(`${BACKEND_URL}/upload-scan`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || 'Model upload failed.');
+  }
+
+  return response.json();
+}
+
+function setClothingOverlay(file) {
+  if (!clothingOverlay) return;
+
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    clothingOverlay.src = event.target.result;
+    clothingOverlay.hidden = false;
+    if (previewHint) {
+      previewHint.hidden = true;
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+function createSizeButton(size) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'size-button';
+  button.textContent = `${size.label} (${size.value})`;
+  button.dataset.sizeValue = size.value;
+  button.addEventListener('click', () => {
+    document.querySelectorAll('.size-button').forEach((btn) => btn.classList.remove('active'));
+    button.classList.add('active');
+    analyzeStatus.textContent = `Selected ${size.label} — ${size.value}`;
+  });
+  return button;
+}
+
+function renderSizeButtons(sizes) {
+  if (!sizeButtons) return;
+  sizeButtons.innerHTML = '';
+
+  if (!sizes || sizes.length === 0) {
+    sizeButtons.textContent = 'No sizes detected. Upload a clearer size guide image or rename the file to include size labels.';
+    return;
+  }
+
+  sizes.forEach((size) => {
+    if (size.label && typeof size.value !== 'undefined') {
+      sizeButtons.appendChild(createSizeButton(size));
+    }
+  });
+}
+
 function loadScanFile(file) {
   if (!file) return;
   if (!modelContainer) return;
@@ -141,17 +212,22 @@ function loadScanFile(file) {
       const object = loader.parse(text);
       object.traverse((child) => {
         if (child.isMesh) {
+          if (!child.material || child.material.opacity === 0 || child.material.color?.getHexString() === '000000') {
+            child.material = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.1 });
+          }
           child.material.side = THREE.DoubleSide;
         }
       });
       currentModel = object;
       scene.add(currentModel);
+      if (previewHint) previewHint.hidden = true;
       fitModelToView(currentModel);
     } else {
       const loader = new THREE.GLTFLoader();
       loader.parse(event.target.result, '', (gltf) => {
         currentModel = gltf.scene;
         scene.add(currentModel);
+        if (previewHint) previewHint.hidden = true;
         fitModelToView(currentModel);
       }, undefined, (error) => {
         console.error('GLTF parse error:', error);
@@ -168,17 +244,33 @@ function loadScanFile(file) {
 }
 
 if (scanUpload) {
-  scanUpload.addEventListener('change', (event) => {
+  scanUpload.addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    try {
+      await uploadScanFileToBackend(file);
+    } catch (error) {
+      console.warn('Backend scan upload failed:', error.message);
+    }
+
+    loadScanFile(file);
+  });
+}
+
+if (clothingUpload) {
+  clothingUpload.addEventListener('change', (event) => {
     const file = event.target.files[0];
     if (file) {
-      loadScanFile(file);
+      setClothingOverlay(file);
     }
   });
 }
 
-async function analyzeFile(file) {
+async function analyzeFile(file, type) {
   const formData = new FormData();
   formData.append('image', file);
+  formData.append('type', type);
 
   const response = await fetch(`${BACKEND_URL}/analyze-image`, {
     method: 'POST',
@@ -224,25 +316,30 @@ if (analyzeButton) {
     analyzeStatus.textContent = 'Analyzing images...';
 
     try {
-      const [clothingAnalysis, sizeGuideAnalysis] = await Promise.all([
-        analyzeFile(clothingFile),
-        analyzeFile(sizeGuideFile),
+      const [clothingResult, sizeGuideResult] = await Promise.all([
+        analyzeFile(clothingFile, 'clothing'),
+        analyzeFile(sizeGuideFile, 'sizeGuide'),
       ]);
 
       analysisResults.innerHTML = `
         <div>
           <h4>Clothing Image Analysis</h4>
-          <pre>${formatAnalysis('Clothing Image', clothingAnalysis)}</pre>
+          <pre>${formatAnalysis('Clothing Image', clothingResult)}</pre>
         </div>
         <div style="margin-top: 1.25rem;">
           <h4>Size Guide Analysis</h4>
-          <pre>${formatAnalysis('Size Guide Image', sizeGuideAnalysis)}</pre>
+          <pre>${formatAnalysis('Size Guide Image', sizeGuideResult)}</pre>
         </div>
       `;
+
+      renderSizeButtons(sizeGuideResult.sizes || []);
       analyzeStatus.textContent = 'Analysis complete.';
     } catch (error) {
       analyzeStatus.textContent = error.message;
       analysisResults.textContent = '';
+      if (sizeButtons) {
+        sizeButtons.innerHTML = '';
+      }
     }
   });
 }
