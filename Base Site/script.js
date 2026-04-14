@@ -155,6 +155,39 @@ function setClothingOverlay(file) {
   reader.readAsDataURL(file);
 }
 
+function calculateImageWidth(sizeValue) {
+  // Convert inches to pixels relative to the preview window size
+  if (!modelContainer) return 200; // Fallback if container not available
+  
+  const previewWidth = modelContainer.clientWidth;
+  
+  // Assume 20 inches is a reasonable reference width that should take up ~80% of preview
+  // This makes smaller sizes (12-15") fit within the preview nicely
+  const referenceWidth = 20;
+  const fillPercentage = 0.8; // Allow some margin on sides
+  
+  const pixelsPerInch = (previewWidth * fillPercentage) / referenceWidth;
+  const widthInPixels = Math.round(sizeValue * pixelsPerInch);
+  
+  // Constrain to reasonable bounds (50px - 95% of preview width)
+  const minWidth = 50;
+  const maxWidth = Math.round(previewWidth * 0.95);
+  const constrainedWidth = Math.max(minWidth, Math.min(maxWidth, widthInPixels));
+  
+  console.log(`Size ${sizeValue}" in ${previewWidth}px preview -> ${widthInPixels}px (constrained: ${constrainedWidth}px)`);
+  return constrainedWidth;
+}
+
+function resizeClothingImage(sizeValue) {
+  if (!clothingOverlay || clothingOverlay.hidden) return;
+  
+  const newWidth = calculateImageWidth(sizeValue);
+  clothingOverlay.style.width = newWidth + 'px';
+  clothingOverlay.style.height = 'auto';
+  clothingOverlay.style.maxWidth = 'none';
+  clothingOverlay.style.maxHeight = 'none';
+}
+
 function createSizeButton(size) {
   const button = document.createElement('button');
   button.type = 'button';
@@ -165,6 +198,7 @@ function createSizeButton(size) {
     document.querySelectorAll('.size-button').forEach((btn) => btn.classList.remove('active'));
     button.classList.add('active');
     analyzeStatus.textContent = `Selected ${size.label} — ${size.value}`;
+    resizeClothingImage(size.value);
   });
   return button;
 }
@@ -190,8 +224,8 @@ function loadScanFile(file) {
   if (!modelContainer) return;
 
   const fileName = file.name.toLowerCase();
-  if (!fileName.endsWith('.glb') && !fileName.endsWith('.gltf') && !fileName.endsWith('.obj')) {
-    alert('Please upload a .glb, .gltf, or .obj scan file');
+  if (!fileName.endsWith('.glb') && !fileName.endsWith('.gltf')) {
+    alert('Please upload a .glb or .gltf scan file');
     return;
   }
 
@@ -206,41 +240,34 @@ function loadScanFile(file) {
 
   const reader = new FileReader();
   reader.onload = (event) => {
-    if (fileName.endsWith('.obj')) {
-      const text = event.target.result;
-      const loader = new THREE.OBJLoader();
-      const object = loader.parse(text);
-      object.traverse((child) => {
+    console.log('File loaded, processing...');
+    const loader = new THREE.GLTFLoader();
+    loader.parse(event.target.result, '', (gltf) => {
+      currentModel = gltf.scene;
+      // Traverse the model to ensure materials are visible
+      currentModel.traverse((child) => {
         if (child.isMesh) {
-          if (!child.material || child.material.opacity === 0 || child.material.color?.getHexString() === '000000') {
-            child.material = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.1 });
+          // Only replace material if it doesn't exist or is completely transparent
+          if (!child.material || child.material.opacity === 0) {
+            child.material = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.6, metalness: 0.1 });
           }
-          child.material.side = THREE.DoubleSide;
+          // Ensure both sides are visible
+          if (child.material) {
+            child.material.side = THREE.DoubleSide;
+          }
         }
       });
-      currentModel = object;
       scene.add(currentModel);
+      console.log('3D model loaded successfully');
       if (previewHint) previewHint.hidden = true;
       fitModelToView(currentModel);
-    } else {
-      const loader = new THREE.GLTFLoader();
-      loader.parse(event.target.result, '', (gltf) => {
-        currentModel = gltf.scene;
-        scene.add(currentModel);
-        if (previewHint) previewHint.hidden = true;
-        fitModelToView(currentModel);
-      }, undefined, (error) => {
-        console.error('GLTF parse error:', error);
-        alert('Error loading scan. Make sure the file is a valid .glb or .gltf.');
-      });
-    }
+    }, undefined, (error) => {
+      console.error('GLTF parse error:', error);
+      alert('Error loading scan. Make sure the file is a valid .glb or .gltf.');
+    });
   };
 
-  if (fileName.endsWith('.obj')) {
-    reader.readAsText(file);
-  } else {
-    reader.readAsArrayBuffer(file);
-  }
+  reader.readAsArrayBuffer(file);
 }
 
 if (scanUpload) {
@@ -283,7 +310,7 @@ async function analyzeFile(file, type) {
   }
 
   const result = await response.json();
-  return result.analysis;
+  return result;
 }
 
 function formatAnalysis(title, analysis) {
@@ -298,6 +325,67 @@ Height: ${analysis.height}px
 Orientation: ${analysis.orientation || 'unknown'}
 Notes: ${analysis.notes}
 `;
+}
+
+// Clothing overlay resize and drag functionality
+let isResizingClothing = false;
+let isDraggingClothing = false;
+let startX, startY, startWidth, startHeight, startTop, startLeft;
+
+if (clothingOverlay) {
+  clothingOverlay.addEventListener('mousedown', (e) => {
+    const rect = clothingOverlay.getBoundingClientRect();
+    const isResizeHandle = e.offsetX > rect.width - 25 && e.offsetY > rect.height - 25;
+
+    if (isResizeHandle) {
+      isResizingClothing = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startWidth = clothingOverlay.offsetWidth;
+      startHeight = clothingOverlay.offsetHeight;
+      startTop = clothingOverlay.style.top;
+      startLeft = clothingOverlay.style.left;
+      e.preventDefault();
+    } else {
+      isDraggingClothing = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startTop = clothingOverlay.style.top;
+      startLeft = clothingOverlay.style.left;
+      clothingOverlay.classList.add('dragging');
+      e.preventDefault();
+    }
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (isResizingClothing) {
+      const deltaX = e.clientX - startX;
+      const deltaY = e.clientY - startY;
+      const newWidth = Math.max(80, startWidth + deltaX);
+      const newHeight = Math.max(80, startHeight + deltaY);
+      clothingOverlay.style.width = newWidth + 'px';
+      clothingOverlay.style.height = newHeight + 'px';
+      clothingOverlay.style.maxWidth = 'none';
+      clothingOverlay.style.maxHeight = 'none';
+    } else if (isDraggingClothing) {
+      const deltaX = e.clientX - startX;
+      const deltaY = e.clientY - startY;
+      const container = modelContainer.getBoundingClientRect();
+      const currentTop = parseFloat(clothingOverlay.style.top || '50%');
+      const currentLeft = parseFloat(clothingOverlay.style.left || '50%');
+      clothingOverlay.style.top = (currentTop + deltaY) + 'px';
+      clothingOverlay.style.left = (currentLeft + deltaX) + 'px';
+      clothingOverlay.style.transform = 'translate(0, 0)';
+      startX = e.clientX;
+      startY = e.clientY;
+    }
+  });
+
+  document.addEventListener('mouseup', () => {
+    isResizingClothing = false;
+    isDraggingClothing = false;
+    clothingOverlay.classList.remove('dragging');
+  });
 }
 
 if (analyzeButton) {
@@ -321,17 +409,31 @@ if (analyzeButton) {
         analyzeFile(sizeGuideFile, 'sizeGuide'),
       ]);
 
+      console.log('Clothing result:', clothingResult);
+      console.log('Size guide result:', sizeGuideResult);
+
+      // Update clothing overlay with processed image if available
+      if (clothingResult.processedImageUrl) {
+        console.log('Using processed image for clothing overlay');
+        clothingOverlay.src = clothingResult.processedImageUrl;
+        clothingOverlay.hidden = false;
+        if (previewHint) {
+          previewHint.hidden = true;
+        }
+      }
+
       analysisResults.innerHTML = `
         <div>
           <h4>Clothing Image Analysis</h4>
-          <pre>${formatAnalysis('Clothing Image', clothingResult)}</pre>
+          <pre>${formatAnalysis('Clothing Image', clothingResult.analysis)}</pre>
         </div>
         <div style="margin-top: 1.25rem;">
           <h4>Size Guide Analysis</h4>
-          <pre>${formatAnalysis('Size Guide Image', sizeGuideResult)}</pre>
+          <pre>${formatAnalysis('Size Guide Image', sizeGuideResult.analysis)}</pre>
         </div>
       `;
 
+      console.log('About to render sizes:', sizeGuideResult.sizes);
       renderSizeButtons(sizeGuideResult.sizes || []);
       analyzeStatus.textContent = 'Analysis complete.';
     } catch (error) {

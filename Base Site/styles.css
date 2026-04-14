@@ -74,13 +74,13 @@ svg {
 }
 
 .hero {
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 4rem 2rem 3rem;
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+  grid-template-columns: minmax(0, 0.8fr) minmax(300px, 1.2fr);
   gap: 2rem;
-  align-items: center;
+  align-items: start;
 }
 
 .hero-copy {
@@ -151,7 +151,7 @@ p {
 
 .visual-card {
   width: 100%;
-  min-height: 320px;
+  min-height: 600px;
   border-radius: 2rem;
   padding: 1.5rem;
   background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
@@ -179,7 +179,7 @@ p {
   border-radius: 1.5rem;
   margin-top: 1.5rem;
   padding: 1rem;
-  min-height: 320px;
+  min-height: 520px;
   overflow: hidden;
 }
 
@@ -205,14 +205,41 @@ p {
   top: 50%;
   left: 50%;
   width: 55%;
-  max-width: 55%;
-  max-height: 55%;
   height: auto;
+  min-width: 80px;
+  min-height: 80px;
   transform: translate(-50%, -50%);
   object-fit: contain;
-  pointer-events: none;
+  pointer-events: auto;
   opacity: 0.9;
   mix-blend-mode: screen;
+  cursor: grab;
+  border: 2px dashed rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+  transition: border-color 0.2s ease;
+}
+
+.clothing-overlay:hover {
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.clothing-overlay.dragging {
+  cursor: grabbing;
+}
+
+.clothing-overlay::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 20px;
+  height: 20px;
+  background: rgba(79, 70, 229, 0.4);
+  border-bottom: 2px solid rgba(79, 70, 229, 0.8);
+  border-right: 2px solid rgba(79, 70, 229, 0.8);
+  border-radius: 0 0 4px 0;
+  cursor: nwse-resize;
+  pointer-events: auto;
 }
 
 .size-guide-panel {
