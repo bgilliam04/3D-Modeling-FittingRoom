@@ -3,18 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>fitting room</title>
-  <link rel="icon" type="image/svg+xml" href="./assets/Fitting Room (400 x 200 px) (2).svg" />
+  <title>fitting room.</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="site-header">
-    <div class="brand">
-      <img class="brand-logo" src="./assets/Fitting Room (400 x 200 px) (6).svg" alt="Fitting Room" />
-    </div>
+    <div class="brand">fitting room.</div>
     <nav class="site-nav" id="siteNav">
       <a href="#home">Home</a>
-      <a href="#workflow">How it Works</a>
       <a href="#analyze">Analyze</a>
       <a href="#collection">Collection</a>
       <a href="#contact">Contact</a>
@@ -48,29 +44,6 @@
       </div>
     </section>
 
-    <section class="workflow" id="workflow">
-      <div class="section-header">
-        <p class="eyebrow">The flow</p>
-        <h2>See Your Fit!</h2>
-      </div>
-      <div class="workflow-grid">
-        <article class="workflow-step">
-          <span>1</span>
-          <h3>Upload Size Guide</h3>
-          <p>Enter the size guide for the site you got your garment from.</p>
-        </article>
-        <article class="workflow-step">
-          <span>2</span>
-          <h3>Choose an outfit</h3>
-          <p>Insert your possible new garment's photo</p>
-        </article>
-        <article class="workflow-step">
-          <span>3</span>
-          <h3>Preview in 3D</h3>
-          <p>See how the garment moves and fits on your virtual body before checkout.</p>
-        </article>
-      </div>
-    </section>
 
     <section class="upload-section" id="analyze">
       <div class="section-header">
@@ -81,8 +54,8 @@
         <article class="upload-card">
           <label class="upload-label">
             3D Scan
-            <input type="file" id="scanUpload" accept=".glb,.gltf,.obj" />
-            <span class="upload-help">Allowed file types: .glb, .gltf, .obj.</span>
+            <input type="file" id="scanUpload" accept=".glb,.gltf" />
+            <span class="upload-help">Allowed file types: .glb and .gltf.</span>
           </label>
         </article>
         <article class="upload-card">
@@ -150,7 +123,6 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/three.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/examples/js/loaders/GLTFLoader.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/examples/js/loaders/OBJLoader.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/examples/js/controls/OrbitControls.js"></script>
   <script src="script.js"></script>
 </body>
