@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 const sizeOf = require('image-size');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
@@ -49,6 +51,95 @@ const GARMENT_LABELS = {
   romper: ['romper', 'jumpsuit'],
   jumpsuit: ['jumpsuit', 'romper'],
 };
+
+const DEFAULT_CLOTHING_SHAPES = {
+  shirt: {
+    minAreaRatio: 0.05,
+    minHeightRatio: 0.18,
+    yRange: [0.25, 0.72],
+    aspectRange: [0.45, 2.8],
+    maxSkinRatio: 0.65,
+    targetY: 0.45,
+    targetAreaRatio: 0.2,
+    cropPadding: { x: 0.12, top: 0.12, bottom: 0.12 },
+  },
+  dress: {
+    minAreaRatio: 0.08,
+    minHeightRatio: 0.25,
+    yRange: [0.3, 0.9],
+    aspectRange: [0.35, 2.2],
+    maxSkinRatio: 0.55,
+    targetY: 0.6,
+    targetAreaRatio: 0.3,
+    cropPadding: { x: 0.2, top: 0.22, bottom: 0.55 },
+  },
+  pants: {
+    minAreaRatio: 0.07,
+    minHeightRatio: 0.24,
+    yRange: [0.42, 0.95],
+    aspectRange: [0.25, 1.8],
+    maxSkinRatio: 0.5,
+    targetY: 0.72,
+    targetAreaRatio: 0.26,
+    cropPadding: { x: 0.24, top: 0.28, bottom: 0.8 },
+  },
+  shorts: {
+    minAreaRatio: 0.06,
+    minHeightRatio: 0.18,
+    yRange: [0.4, 0.85],
+    aspectRange: [0.35, 2.2],
+    maxSkinRatio: 0.56,
+    targetY: 0.65,
+    targetAreaRatio: 0.2,
+    cropPadding: { x: 0.24, top: 0.28, bottom: 0.58 },
+  },
+  skirt: {
+    minAreaRatio: 0.08,
+    minHeightRatio: 0.2,
+    yRange: [0.48, 0.97],
+    aspectRange: [0.3, 2.8],
+    maxSkinRatio: 0.42,
+    targetY: 0.74,
+    targetAreaRatio: 0.24,
+    cropPadding: { x: 0.3, top: 0.36, bottom: 1.05 },
+  },
+  jacket: {
+    minAreaRatio: 0.06,
+    minHeightRatio: 0.2,
+    yRange: [0.24, 0.8],
+    aspectRange: [0.35, 2.5],
+    maxSkinRatio: 0.6,
+    targetY: 0.48,
+    targetAreaRatio: 0.24,
+    cropPadding: { x: 0.16, top: 0.16, bottom: 0.2 },
+  },
+};
+
+const CLOTHING_SHAPES_PATH = path.join(__dirname, 'clothing-shapes.json');
+
+function loadClothingShapes() {
+  try {
+    if (!fs.existsSync(CLOTHING_SHAPES_PATH)) {
+      return DEFAULT_CLOTHING_SHAPES;
+    }
+
+    const fileContent = fs.readFileSync(CLOTHING_SHAPES_PATH, 'utf8');
+    const parsed = JSON.parse(fileContent);
+    return {
+      ...DEFAULT_CLOTHING_SHAPES,
+      ...parsed,
+    };
+  } catch (error) {
+    console.warn('Failed to load clothing-shapes.json, using defaults:', error.message);
+    return DEFAULT_CLOTHING_SHAPES;
+  }
+}
+
+const CLOTHING_SHAPES = loadClothingShapes();
+
+function getClothingShapeProfile(garmentType) {
+  return CLOTHING_SHAPES[garmentType] || CLOTHING_SHAPES.shirt || DEFAULT_CLOTHING_SHAPES.shirt;
+}
 
 function getCandidateLabelsForGarment(garmentType) {
   return GARMENT_LABELS[garmentType] || GARMENT_LABELS.shirt;
@@ -113,7 +204,11 @@ function estimateSkinRatioInBox(rawData, width, height, channels, box) {
 
 function selectBestGarmentDetection(detections, garmentType, imageWidth, imageHeight, rawData, channels) {
   const maxDistance = Math.max(1, Math.hypot(imageWidth / 2, imageHeight / 2));
-  const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
+  const profile = getClothingShapeProfile(garmentType);
+  const [minYRange, maxYRange] = profile.yRange || [0, 1];
+  const [minAspect, maxAspect] = profile.aspectRange || [0.2, 3.5];
+  const targetY = typeof profile.targetY === 'number' ? profile.targetY : 0.5;
+  const targetAreaRatio = typeof profile.targetAreaRatio === 'number' ? profile.targetAreaRatio : 0.2;
 
   let bestDetection = null;
   let bestScore = -Infinity;
@@ -139,31 +234,29 @@ function selectBestGarmentDetection(detections, garmentType, imageWidth, imageHe
     const yNormalized = centerY / imageHeight;
     const skinRatio = estimateSkinRatioInBox(rawData, imageWidth, imageHeight, channels, detection.box);
 
-    // Skirt-specific hard filters to avoid selecting bracelets/arms.
-    if (garmentType === 'skirt') {
-      const isTooSmall = areaRatio < 0.08 || heightRatio < 0.18;
-      const isTooHigh = yNormalized < 0.48;
-      const isTooSkinHeavy = skinRatio > 0.42;
-      const hasAccessoryLikeShape = aspectRatio > 3.2 || aspectRatio < 0.28;
+    const failsShapeRules =
+      areaRatio < (profile.minAreaRatio ?? 0.05) ||
+      heightRatio < (profile.minHeightRatio ?? 0.16) ||
+      yNormalized < minYRange ||
+      yNormalized > maxYRange ||
+      aspectRatio < minAspect ||
+      aspectRatio > maxAspect ||
+      skinRatio > (profile.maxSkinRatio ?? 0.65);
 
-      if (isTooSmall || isTooHigh || isTooSkinHeavy || hasAccessoryLikeShape) {
-        continue;
-      }
+    if (failsShapeRules) {
+      continue;
     }
 
     const baseScore = Math.max(0.01, detection.score);
-    const areaWeight = Math.max(0.2, Math.min(2.5, areaRatio * 6));
+    const areaDistance = Math.abs(areaRatio - targetAreaRatio) / Math.max(0.02, targetAreaRatio);
+    const areaWeight = Math.max(0.25, 1.4 - Math.min(1.1, areaDistance));
     const centerWeight = Math.max(0.2, 1 - centerDistance * 0.8);
     const skinWeight = Math.max(0.05, 1 - skinRatio * 0.9);
+    const yDistance = Math.abs(yNormalized - targetY);
+    const yWeight = Math.max(0.2, 1.35 - Math.min(1.1, yDistance * 2.2));
+    const shapeWeight = Math.max(0.2, 1.2 - Math.min(1, Math.abs(aspectRatio - ((minAspect + maxAspect) / 2))));
 
-    let garmentSpecificWeight = 1;
-    if (lowerBodyGarments.has(garmentType)) {
-      const lowerBodyWeight = yNormalized < 0.45 ? 0.2 : Math.min(1.4, 0.6 + yNormalized);
-      const minAreaWeight = areaRatio < 0.06 ? 0.15 : 1;
-      garmentSpecificWeight *= lowerBodyWeight * minAreaWeight;
-    }
-
-    const combinedScore = baseScore * areaWeight * centerWeight * skinWeight * garmentSpecificWeight;
+    const combinedScore = baseScore * areaWeight * centerWeight * skinWeight * yWeight * shapeWeight;
     if (combinedScore > bestScore) {
       bestScore = combinedScore;
       bestDetection = {
@@ -555,13 +648,12 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
 
     const boxWidth = right - left + 1;
     const boxHeight = bottom - top + 1;
-    const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
-    const isLowerBodyGarment = lowerBodyGarments.has(normalizedGarmentType);
+    const shapeProfile = getClothingShapeProfile(normalizedGarmentType);
+    const cropPadding = shapeProfile.cropPadding || { x: 0.12, top: 0.12, bottom: 0.12 };
 
-    // Lower-body garments often get partial boxes; expand asymmetrically to include the full garment.
-    const paddingX = Math.max(8, Math.round(boxWidth * (isLowerBodyGarment ? 0.26 : 0.12)));
-    const topPadding = Math.max(8, Math.round(boxHeight * (isLowerBodyGarment ? 0.32 : 0.12)));
-    const bottomPadding = Math.max(8, Math.round(boxHeight * (isLowerBodyGarment ? 0.95 : 0.12)));
+    const paddingX = Math.max(8, Math.round(boxWidth * (cropPadding.x ?? 0.12)));
+    const topPadding = Math.max(8, Math.round(boxHeight * (cropPadding.top ?? 0.12)));
+    const bottomPadding = Math.max(8, Math.round(boxHeight * (cropPadding.bottom ?? 0.12)));
 
     const cropLeft = Math.max(0, left - paddingX);
     const cropTop = Math.max(0, top - topPadding);

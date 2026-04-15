@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "generate:clothing-shapes:from-outlines": "node scripts/generate-clothing-shapes-from-outlines.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.1.0",

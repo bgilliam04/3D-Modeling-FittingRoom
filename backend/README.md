@@ -15,6 +15,17 @@ npm install
 npm start
 ```
 
+## Build shape templates from outline PNGs
+
+1. Put PNG outlines into garment subfolders under `clothing-outline-pngs/`.
+2. Run:
+
+```bash
+npm run generate:clothing-shapes:from-outlines
+```
+
+This updates `clothing-shapes.json` by keeping existing garment detection thresholds and replacing each garment's `shapeOutlines` with templates generated from PNG silhouettes.
+
 ## API
 
 POST `/analyze-image`

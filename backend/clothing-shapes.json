@@ -1,0 +1,920 @@
+{
+  "shirt": {
+    "minAreaRatio": 0.145,
+    "minHeightRatio": 0.326,
+    "yRange": [
+      0.275,
+      0.625
+    ],
+    "aspectRange": [
+      0.765,
+      1.565
+    ],
+    "maxSkinRatio": 0.358,
+    "targetY": 0.45,
+    "targetAreaRatio": 0.205,
+    "cropPadding": {
+      "x": 0.13,
+      "top": 0.125,
+      "bottom": 0.13
+    },
+    "shapeOutlines": {
+      "templateCount": 2,
+      "templates": [
+        [
+          [
+            0.2,
+            0.08
+          ],
+          [
+            0.8,
+            0.08
+          ],
+          [
+            0.9,
+            0.2
+          ],
+          [
+            0.84,
+            0.48
+          ],
+          [
+            0.75,
+            0.95
+          ],
+          [
+            0.25,
+            0.95
+          ],
+          [
+            0.16,
+            0.48
+          ],
+          [
+            0.1,
+            0.2
+          ]
+        ],
+        [
+          [
+            0.24,
+            0.08
+          ],
+          [
+            0.76,
+            0.08
+          ],
+          [
+            0.9,
+            0.21
+          ],
+          [
+            0.82,
+            0.53
+          ],
+          [
+            0.72,
+            0.96
+          ],
+          [
+            0.28,
+            0.96
+          ],
+          [
+            0.18,
+            0.53
+          ],
+          [
+            0.1,
+            0.21
+          ]
+        ]
+      ],
+      "widthProfile": [
+        {
+          "y": 0,
+          "meanWidth": 0,
+          "sampleCount": 0
+        },
+        {
+          "y": 0.111,
+          "meanWidth": 0.619,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.222,
+          "meanWidth": 0.792,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.333,
+          "meanWidth": 0.741,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.444,
+          "meanWidth": 0.689,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.556,
+          "meanWidth": 0.64,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.667,
+          "meanWidth": 0.592,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.778,
+          "meanWidth": 0.545,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.889,
+          "meanWidth": 0.498,
+          "sampleCount": 2
+        },
+        {
+          "y": 1,
+          "meanWidth": 0,
+          "sampleCount": 0
+        }
+      ]
+    }
+  },
+  "dress": {
+    "minAreaRatio": 0.219,
+    "minHeightRatio": 0.437,
+    "yRange": [
+      0.42,
+      0.77
+    ],
+    "aspectRange": [
+      0.405,
+      1.205
+    ],
+    "maxSkinRatio": 0.319,
+    "targetY": 0.595,
+    "targetAreaRatio": 0.3,
+    "cropPadding": {
+      "x": 0.19,
+      "top": 0.21,
+      "bottom": 0.54
+    },
+    "shapeOutlines": {
+      "templateCount": 2,
+      "templates": [
+        [
+          [
+            0.34,
+            0.06
+          ],
+          [
+            0.66,
+            0.06
+          ],
+          [
+            0.78,
+            0.24
+          ],
+          [
+            0.72,
+            0.55
+          ],
+          [
+            0.84,
+            0.98
+          ],
+          [
+            0.16,
+            0.98
+          ],
+          [
+            0.28,
+            0.55
+          ],
+          [
+            0.22,
+            0.24
+          ]
+        ],
+        [
+          [
+            0.36,
+            0.08
+          ],
+          [
+            0.64,
+            0.08
+          ],
+          [
+            0.76,
+            0.26
+          ],
+          [
+            0.69,
+            0.58
+          ],
+          [
+            0.79,
+            0.98
+          ],
+          [
+            0.21,
+            0.98
+          ],
+          [
+            0.31,
+            0.58
+          ],
+          [
+            0.24,
+            0.26
+          ]
+        ]
+      ],
+      "widthProfile": [
+        {
+          "y": 0,
+          "meanWidth": 0,
+          "sampleCount": 0
+        },
+        {
+          "y": 0.111,
+          "meanWidth": 0.355,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.222,
+          "meanWidth": 0.503,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.333,
+          "meanWidth": 0.506,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.444,
+          "meanWidth": 0.46,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.556,
+          "meanWidth": 0.417,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.667,
+          "meanWidth": 0.464,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.778,
+          "meanWidth": 0.523,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.889,
+          "meanWidth": 0.582,
+          "sampleCount": 2
+        },
+        {
+          "y": 1,
+          "meanWidth": 0,
+          "sampleCount": 0
+        }
+      ]
+    }
+  },
+  "pants": {
+    "minAreaRatio": 0.182,
+    "minHeightRatio": 0.37,
+    "yRange": [
+      0.545,
+      0.895
+    ],
+    "aspectRange": [
+      0.305,
+      1.105
+    ],
+    "maxSkinRatio": 0.389,
+    "targetY": 0.72,
+    "targetAreaRatio": 0.255,
+    "cropPadding": {
+      "x": 0.24,
+      "top": 0.28,
+      "bottom": 0.8
+    },
+    "shapeOutlines": {
+      "templateCount": 2,
+      "templates": [
+        [
+          [
+            0.22,
+            0.05
+          ],
+          [
+            0.78,
+            0.05
+          ],
+          [
+            0.72,
+            0.42
+          ],
+          [
+            0.61,
+            0.98
+          ],
+          [
+            0.49,
+            0.98
+          ],
+          [
+            0.46,
+            0.46
+          ],
+          [
+            0.54,
+            0.46
+          ],
+          [
+            0.51,
+            0.98
+          ],
+          [
+            0.39,
+            0.98
+          ],
+          [
+            0.28,
+            0.42
+          ]
+        ],
+        [
+          [
+            0.2,
+            0.06
+          ],
+          [
+            0.8,
+            0.06
+          ],
+          [
+            0.73,
+            0.43
+          ],
+          [
+            0.64,
+            0.98
+          ],
+          [
+            0.5,
+            0.98
+          ],
+          [
+            0.47,
+            0.48
+          ],
+          [
+            0.53,
+            0.48
+          ],
+          [
+            0.5,
+            0.98
+          ],
+          [
+            0.36,
+            0.98
+          ],
+          [
+            0.27,
+            0.43
+          ]
+        ]
+      ],
+      "widthProfile": [
+        {
+          "y": 0,
+          "meanWidth": 0,
+          "sampleCount": 0
+        },
+        {
+          "y": 0.111,
+          "meanWidth": 0.56,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.222,
+          "meanWidth": 0.521,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.333,
+          "meanWidth": 0.482,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.444,
+          "meanWidth": 0.443,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.556,
+          "meanWidth": 0.403,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.667,
+          "meanWidth": 0.363,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.778,
+          "meanWidth": 0.323,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.889,
+          "meanWidth": 0.283,
+          "sampleCount": 2
+        },
+        {
+          "y": 1,
+          "meanWidth": 0,
+          "sampleCount": 0
+        }
+      ]
+    }
+  },
+  "shorts": {
+    "minAreaRatio": 0.143,
+    "minHeightRatio": 0.242,
+    "yRange": [
+      0.475,
+      0.825
+    ],
+    "aspectRange": [
+      0.535,
+      1.335
+    ],
+    "maxSkinRatio": 0.508,
+    "targetY": 0.65,
+    "targetAreaRatio": 0.195,
+    "cropPadding": {
+      "x": 0.235,
+      "top": 0.285,
+      "bottom": 0.57
+    },
+    "shapeOutlines": {
+      "templateCount": 2,
+      "templates": [
+        [
+          [
+            0.2,
+            0.08
+          ],
+          [
+            0.8,
+            0.08
+          ],
+          [
+            0.75,
+            0.45
+          ],
+          [
+            0.63,
+            0.88
+          ],
+          [
+            0.5,
+            0.88
+          ],
+          [
+            0.48,
+            0.53
+          ],
+          [
+            0.52,
+            0.53
+          ],
+          [
+            0.5,
+            0.88
+          ],
+          [
+            0.37,
+            0.88
+          ],
+          [
+            0.25,
+            0.45
+          ]
+        ],
+        [
+          [
+            0.18,
+            0.08
+          ],
+          [
+            0.82,
+            0.08
+          ],
+          [
+            0.76,
+            0.42
+          ],
+          [
+            0.66,
+            0.84
+          ],
+          [
+            0.52,
+            0.84
+          ],
+          [
+            0.5,
+            0.5
+          ],
+          [
+            0.54,
+            0.5
+          ],
+          [
+            0.52,
+            0.84
+          ],
+          [
+            0.38,
+            0.84
+          ],
+          [
+            0.28,
+            0.42
+          ]
+        ]
+      ],
+      "widthProfile": [
+        {
+          "y": 0,
+          "meanWidth": 0,
+          "sampleCount": 0
+        },
+        {
+          "y": 0.111,
+          "meanWidth": 0.608,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.222,
+          "meanWidth": 0.567,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.333,
+          "meanWidth": 0.526,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.444,
+          "meanWidth": 0.485,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.556,
+          "meanWidth": 0.428,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.667,
+          "meanWidth": 0.371,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.778,
+          "meanWidth": 0.313,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.889,
+          "meanWidth": 0,
+          "sampleCount": 0
+        },
+        {
+          "y": 1,
+          "meanWidth": 0,
+          "sampleCount": 0
+        }
+      ]
+    }
+  },
+  "skirt": {
+    "minAreaRatio": 0.182,
+    "minHeightRatio": 0.325,
+    "yRange": [
+      0.575,
+      0.925
+    ],
+    "aspectRange": [
+      0.715,
+      1.515
+    ],
+    "maxSkinRatio": 0.378,
+    "targetY": 0.75,
+    "targetAreaRatio": 0.25,
+    "cropPadding": {
+      "x": 0.3,
+      "top": 0.34,
+      "bottom": 1.015
+    },
+    "shapeOutlines": {
+      "templateCount": 2,
+      "templates": [
+        [
+          [
+            0.38,
+            0.05
+          ],
+          [
+            0.62,
+            0.05
+          ],
+          [
+            0.84,
+            0.98
+          ],
+          [
+            0.16,
+            0.98
+          ]
+        ],
+        [
+          [
+            0.4,
+            0.05
+          ],
+          [
+            0.6,
+            0.05
+          ],
+          [
+            0.8,
+            0.98
+          ],
+          [
+            0.2,
+            0.98
+          ]
+        ]
+      ],
+      "widthProfile": [
+        {
+          "y": 0,
+          "meanWidth": 0,
+          "sampleCount": 0
+        },
+        {
+          "y": 0.111,
+          "meanWidth": 0.248,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.222,
+          "meanWidth": 0.298,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.333,
+          "meanWidth": 0.348,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.444,
+          "meanWidth": 0.398,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.556,
+          "meanWidth": 0.448,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.667,
+          "meanWidth": 0.498,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.778,
+          "meanWidth": 0.549,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.889,
+          "meanWidth": 0.599,
+          "sampleCount": 2
+        },
+        {
+          "y": 1,
+          "meanWidth": 0,
+          "sampleCount": 0
+        }
+      ]
+    }
+  },
+  "jacket": {
+    "minAreaRatio": 0.174,
+    "minHeightRatio": 0.347,
+    "yRange": [
+      0.315,
+      0.665
+    ],
+    "aspectRange": [
+      0.72,
+      1.52
+    ],
+    "maxSkinRatio": 0.468,
+    "targetY": 0.49,
+    "targetAreaRatio": 0.24,
+    "cropPadding": {
+      "x": 0.165,
+      "top": 0.165,
+      "bottom": 0.21
+    },
+    "shapeOutlines": {
+      "templateCount": 2,
+      "templates": [
+        [
+          [
+            0.22,
+            0.08
+          ],
+          [
+            0.78,
+            0.08
+          ],
+          [
+            0.9,
+            0.22
+          ],
+          [
+            0.8,
+            0.62
+          ],
+          [
+            0.74,
+            0.98
+          ],
+          [
+            0.56,
+            0.98
+          ],
+          [
+            0.52,
+            0.32
+          ],
+          [
+            0.48,
+            0.32
+          ],
+          [
+            0.44,
+            0.98
+          ],
+          [
+            0.26,
+            0.98
+          ],
+          [
+            0.2,
+            0.62
+          ],
+          [
+            0.1,
+            0.22
+          ]
+        ],
+        [
+          [
+            0.2,
+            0.09
+          ],
+          [
+            0.8,
+            0.09
+          ],
+          [
+            0.88,
+            0.24
+          ],
+          [
+            0.79,
+            0.64
+          ],
+          [
+            0.72,
+            0.98
+          ],
+          [
+            0.58,
+            0.98
+          ],
+          [
+            0.53,
+            0.34
+          ],
+          [
+            0.47,
+            0.34
+          ],
+          [
+            0.42,
+            0.98
+          ],
+          [
+            0.28,
+            0.98
+          ],
+          [
+            0.21,
+            0.64
+          ],
+          [
+            0.12,
+            0.24
+          ]
+        ]
+      ],
+      "widthProfile": [
+        {
+          "y": 0,
+          "meanWidth": 0,
+          "sampleCount": 0
+        },
+        {
+          "y": 0.111,
+          "meanWidth": 0.618,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.222,
+          "meanWidth": 0.77,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.333,
+          "meanWidth": 0.731,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.444,
+          "meanWidth": 0.678,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.556,
+          "meanWidth": 0.625,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.667,
+          "meanWidth": 0.577,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.778,
+          "meanWidth": 0.535,
+          "sampleCount": 2
+        },
+        {
+          "y": 0.889,
+          "meanWidth": 0.494,
+          "sampleCount": 2
+        },
+        {
+          "y": 1,
+          "meanWidth": 0,
+          "sampleCount": 0
+        }
+      ]
+    }
+  },
+  "_meta": {
+    "generatedAt": "2026-04-15T18:13:08.599Z",
+    "sourceFile": "clothing-shape-training-data.json",
+    "sampleCount": 12,
+    "garments": [
+      "dress",
+      "jacket",
+      "pants",
+      "shirt",
+      "shorts",
+      "skirt"
+    ],
+    "generator": "generate-clothing-shapes-from-outlines",
+    "outlinesDir": "clothing-outline-pngs",
+    "garmentsFromOutlinePngs": []
+  }
+}
