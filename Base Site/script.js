@@ -53,6 +53,8 @@ let currentModel = null;
 let clothingPreviewJobId = 0;
 let currentClothingSizeValue = null;
 let currentGarmentCutout = null;
+let cachedClothingAnalysisKey = null;
+let cachedClothingResult = null;
 
 function initModelViewer() {
   if (!modelContainer) return;
@@ -194,6 +196,16 @@ function setCutoutOverlay(dataUrl, cutout = null) {
 
 function getSelectedGarmentType() {
   return garmentTypeSelect?.value || 'shirt';
+}
+
+function getClothingAnalysisKey(file, garmentType) {
+  if (!file) return null;
+  return [
+    file.name,
+    file.size,
+    file.lastModified,
+    garmentType || 'shirt',
+  ].join('|');
 }
 
 function calculateImageWidth(sizeValue) {
@@ -342,34 +354,24 @@ if (scanUpload) {
 }
 
 if (clothingUpload) {
-  clothingUpload.addEventListener('change', async (event) => {
+  clothingUpload.addEventListener('change', (event) => {
     const file = event.target.files[0];
     if (file) {
       clothingPreviewJobId += 1;
-      const previewId = clothingPreviewJobId;
-      const garmentType = getSelectedGarmentType();
-
-      try {
-        analyzeStatus.textContent = 'Cutting garment from clothing image...';
-        const clothingResult = await analyzeFile(file, 'clothing', garmentType);
-        if (previewId !== clothingPreviewJobId) return;
-
-        if (clothingResult.processedImageUrl) {
-          setCutoutOverlay(clothingResult.processedImageUrl, clothingResult.cutout);
-          analyzeStatus.textContent = 'Garment cutout ready.';
-        } else {
-          currentGarmentCutout = null;
-          setClothingOverlay(file);
-          analyzeStatus.textContent = 'Garment cutout unavailable, showing original image.';
-        }
-      } catch (error) {
-        console.warn('Garment cutout failed:', error.message);
-        if (previewId !== clothingPreviewJobId) return;
-        currentGarmentCutout = null;
-        setClothingOverlay(file);
-        analyzeStatus.textContent = 'Could not cut out garment. Showing original image.';
-      }
+      cachedClothingAnalysisKey = null;
+      cachedClothingResult = null;
+      currentGarmentCutout = null;
+      setClothingOverlay(file);
+      analyzeStatus.textContent = 'Clothing image ready. Press Analyze to process garment cutout.';
     }
+  });
+}
+
+if (garmentTypeSelect) {
+  garmentTypeSelect.addEventListener('change', () => {
+    // Changing garment type invalidates the cached cutout selection.
+    cachedClothingAnalysisKey = null;
+    cachedClothingResult = null;
   });
 }
 
@@ -478,6 +480,7 @@ if (analyzeButton) {
     const clothingFile = clothingUpload?.files[0];
     const sizeGuideFile = sizeGuideUpload?.files[0];
     const garmentType = getSelectedGarmentType();
+    const analysisKey = getClothingAnalysisKey(clothingFile, garmentType);
 
     if (!clothingFile || !sizeGuideFile) {
       analyzeStatus.textContent = 'Please upload both a clothing image and a size guide image.';
@@ -487,10 +490,14 @@ if (analyzeButton) {
     analyzeStatus.textContent = 'Analyzing images...';
 
     try {
-      const [clothingResult, sizeGuideResult] = await Promise.all([
-        analyzeFile(clothingFile, 'clothing', garmentType),
-        analyzeFile(sizeGuideFile, 'sizeGuide'),
-      ]);
+      let clothingResult = cachedClothingResult;
+      if (!clothingResult || analysisKey !== cachedClothingAnalysisKey) {
+        clothingResult = await analyzeFile(clothingFile, 'clothing', garmentType);
+        cachedClothingAnalysisKey = analysisKey;
+        cachedClothingResult = clothingResult;
+      }
+
+      const sizeGuideResult = await analyzeFile(sizeGuideFile, 'sizeGuide');
 
       console.log('Clothing result:', clothingResult);
       console.log('Size guide result:', sizeGuideResult);

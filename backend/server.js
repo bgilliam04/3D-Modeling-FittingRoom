@@ -39,7 +39,7 @@ const GARMENT_LABELS = {
   dress: ['dress', 'gown', 'frock'],
   pants: ['pants', 'trousers', 'jeans', 'slacks', 'leggings'],
   shorts: ['shorts', 'short pants'],
-  skirt: ['skirt'],
+  skirt: ['skirt', 'long skirt', 'mini skirt', 'maxi skirt', 'pleated skirt', 'a-line skirt'],
   jacket: ['jacket', 'coat', 'blazer', 'hoodie', 'cardigan'],
   hoodie: ['hoodie', 'sweatshirt'],
   sweater: ['sweater', 'jumper', 'pullover', 'cardigan'],
@@ -61,6 +61,119 @@ function normalizeGarmentType(garmentType) {
 
   const normalized = garmentType.toLowerCase().trim();
   return Object.prototype.hasOwnProperty.call(GARMENT_LABELS, normalized) ? normalized : 'shirt';
+}
+
+function isSkinTonePixel(red, green, blue) {
+  const maxChannel = Math.max(red, green, blue);
+  const minChannel = Math.min(red, green, blue);
+  const chroma = maxChannel - minChannel;
+
+  if (red < 85 || green < 35 || blue < 15) return false;
+  if (chroma < 10) return false;
+  if (Math.abs(red - green) < 12) return false;
+  if (red <= green || red <= blue) return false;
+
+  const saturation = maxChannel === 0 ? 0 : chroma / maxChannel;
+  return saturation > 0.08;
+}
+
+function estimateSkinRatioInBox(rawData, width, height, channels, box) {
+  const left = Math.max(0, Math.min(width - 1, Math.floor(box.xmin)));
+  const top = Math.max(0, Math.min(height - 1, Math.floor(box.ymin)));
+  const right = Math.max(0, Math.min(width - 1, Math.ceil(box.xmax)));
+  const bottom = Math.max(0, Math.min(height - 1, Math.ceil(box.ymax)));
+
+  if (right <= left || bottom <= top) {
+    return 1;
+  }
+
+  const sampleStep = 3;
+  let sampledPixels = 0;
+  let skinPixels = 0;
+
+  for (let y = top; y <= bottom; y += sampleStep) {
+    for (let x = left; x <= right; x += sampleStep) {
+      const offset = (y * width + x) * channels;
+      const alpha = channels >= 4 ? rawData[offset + 3] : 255;
+      if (alpha < 16) continue;
+
+      sampledPixels += 1;
+      if (isSkinTonePixel(rawData[offset], rawData[offset + 1], rawData[offset + 2])) {
+        skinPixels += 1;
+      }
+    }
+  }
+
+  if (sampledPixels === 0) {
+    return 1;
+  }
+
+  return skinPixels / sampledPixels;
+}
+
+function selectBestGarmentDetection(detections, garmentType, imageWidth, imageHeight, rawData, channels) {
+  const maxDistance = Math.max(1, Math.hypot(imageWidth / 2, imageHeight / 2));
+  const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
+
+  let bestDetection = null;
+  let bestScore = -Infinity;
+
+  for (const detection of detections) {
+    if (!detection?.box) continue;
+
+    const left = Math.max(0, Math.min(imageWidth - 1, Math.floor(detection.box.xmin)));
+    const top = Math.max(0, Math.min(imageHeight - 1, Math.floor(detection.box.ymin)));
+    const right = Math.max(0, Math.min(imageWidth - 1, Math.ceil(detection.box.xmax)));
+    const bottom = Math.max(0, Math.min(imageHeight - 1, Math.ceil(detection.box.ymax)));
+
+    if (right <= left || bottom <= top) continue;
+
+    const boxWidth = right - left + 1;
+    const boxHeight = bottom - top + 1;
+    const areaRatio = (boxWidth * boxHeight) / (imageWidth * imageHeight);
+    const heightRatio = boxHeight / imageHeight;
+    const aspectRatio = boxWidth / Math.max(1, boxHeight);
+    const centerX = left + boxWidth / 2;
+    const centerY = top + boxHeight / 2;
+    const centerDistance = Math.hypot(centerX - imageWidth / 2, centerY - imageHeight / 2) / maxDistance;
+    const yNormalized = centerY / imageHeight;
+    const skinRatio = estimateSkinRatioInBox(rawData, imageWidth, imageHeight, channels, detection.box);
+
+    // Skirt-specific hard filters to avoid selecting bracelets/arms.
+    if (garmentType === 'skirt') {
+      const isTooSmall = areaRatio < 0.08 || heightRatio < 0.18;
+      const isTooHigh = yNormalized < 0.48;
+      const isTooSkinHeavy = skinRatio > 0.42;
+      const hasAccessoryLikeShape = aspectRatio > 3.2 || aspectRatio < 0.28;
+
+      if (isTooSmall || isTooHigh || isTooSkinHeavy || hasAccessoryLikeShape) {
+        continue;
+      }
+    }
+
+    const baseScore = Math.max(0.01, detection.score);
+    const areaWeight = Math.max(0.2, Math.min(2.5, areaRatio * 6));
+    const centerWeight = Math.max(0.2, 1 - centerDistance * 0.8);
+    const skinWeight = Math.max(0.05, 1 - skinRatio * 0.9);
+
+    let garmentSpecificWeight = 1;
+    if (lowerBodyGarments.has(garmentType)) {
+      const lowerBodyWeight = yNormalized < 0.45 ? 0.2 : Math.min(1.4, 0.6 + yNormalized);
+      const minAreaWeight = areaRatio < 0.06 ? 0.15 : 1;
+      garmentSpecificWeight *= lowerBodyWeight * minAreaWeight;
+    }
+
+    const combinedScore = baseScore * areaWeight * centerWeight * skinWeight * garmentSpecificWeight;
+    if (combinedScore > bestScore) {
+      bestScore = combinedScore;
+      bestDetection = {
+        ...detection,
+        box: { xmin: left, ymin: top, xmax: right, ymax: bottom },
+      };
+    }
+  }
+
+  return bestDetection;
 }
 
 let garmentDetectorPromise = null;
@@ -137,7 +250,7 @@ function findAlphaBounds(rawImage) {
   };
 }
 
-function refineCutoutMask(rawImage) {
+function refineCutoutMask(rawImage, garmentType = 'shirt') {
   if (!rawImage || rawImage.channels < 4) {
     return { image: rawImage, bounds: findAlphaBounds(rawImage) };
   }
@@ -249,6 +362,58 @@ function refineCutoutMask(rawImage) {
     }
   }
 
+  // Skirt-specific cleanup: remove attached hand/arm regions by stripping skin-like clusters.
+  if (garmentType === 'skirt') {
+    const skinMask = new Uint8Array(width * height);
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (!keepMask[index]) continue;
+
+        const offset = index * channels;
+        if (data[offset + 3] === 0) continue;
+
+        // Skirt hands are most often near upper/mid garment area; avoid over-trimming lower hem.
+        if (y > Math.round(height * 0.8)) continue;
+
+        if (isSkinTonePixel(data[offset], data[offset + 1], data[offset + 2])) {
+          skinMask[index] = 1;
+        }
+      }
+    }
+
+    // Expand the mask so connected bracelet/arm edges are removed with the skin pixels.
+    const expansionPasses = 2;
+    for (let pass = 0; pass < expansionPasses; pass += 1) {
+      const expanded = new Uint8Array(width * height);
+
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const index = y * width + x;
+          if (!skinMask[index]) continue;
+
+          expanded[index] = 1;
+          if (x > 0) expanded[index - 1] = 1;
+          if (x < width - 1) expanded[index + 1] = 1;
+          if (y > 0) expanded[index - width] = 1;
+          if (y < height - 1) expanded[index + width] = 1;
+        }
+      }
+
+      skinMask.set(expanded);
+    }
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (!skinMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+  }
+
   // Second pass: trim weak alpha remnants then keep the strongest remaining component again.
   const secondPassAlphaThreshold = 144;
   const secondMask = new Uint8Array(width * height);
@@ -276,7 +441,10 @@ function refineCutoutMask(rawImage) {
     }
   }
 
-  // Garment-only hardening: remove any remaining foreground connected to image borders.
+  // Garment-only hardening: remove remaining border-connected foreground.
+  // For lower-body garments, keep bottom-connected pixels to avoid clipping skirt hems.
+  const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
+  const preserveBottomEdge = lowerBodyGarments.has(garmentType);
   const borderConnected = new Uint8Array(width * height);
   const queue = [];
   let queueHead = 0;
@@ -294,7 +462,9 @@ function refineCutoutMask(rawImage) {
 
   for (let x = 0; x < width; x += 1) {
     enqueueBorderConnected(x, 0);
-    enqueueBorderConnected(x, height - 1);
+    if (!preserveBottomEdge) {
+      enqueueBorderConnected(x, height - 1);
+    }
   }
   for (let y = 0; y < height; y += 1) {
     enqueueBorderConnected(0, y);
@@ -349,6 +519,10 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
   try {
     const orientedBuffer = await sharp(buffer).rotate().png().toBuffer();
     const image = await rawImageFromBuffer(orientedBuffer, 'image/png');
+    const orientedRaw = await sharp(orientedBuffer)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
     const detector = await getGarmentDetector();
     const detections = await detector(image, candidateLabels, { threshold: 0.08, top_k: 5 });
 
@@ -356,10 +530,14 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
       throw new Error('No garment detected.');
     }
 
-    const bestDetection = detections
-      .slice()
-      .sort((a, b) => b.score - a.score)
-      .find((detection) => detection?.box);
+    const bestDetection = selectBestGarmentDetection(
+      detections,
+      normalizedGarmentType,
+      orientedRaw.info.width,
+      orientedRaw.info.height,
+      orientedRaw.data,
+      orientedRaw.info.channels
+    );
 
     if (!bestDetection) {
       throw new Error('No garment bounding box found.');
@@ -377,12 +555,18 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
 
     const boxWidth = right - left + 1;
     const boxHeight = bottom - top + 1;
-    const paddingX = Math.max(8, Math.round(boxWidth * 0.12));
-    const paddingY = Math.max(8, Math.round(boxHeight * 0.12));
+    const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
+    const isLowerBodyGarment = lowerBodyGarments.has(normalizedGarmentType);
+
+    // Lower-body garments often get partial boxes; expand asymmetrically to include the full garment.
+    const paddingX = Math.max(8, Math.round(boxWidth * (isLowerBodyGarment ? 0.26 : 0.12)));
+    const topPadding = Math.max(8, Math.round(boxHeight * (isLowerBodyGarment ? 0.32 : 0.12)));
+    const bottomPadding = Math.max(8, Math.round(boxHeight * (isLowerBodyGarment ? 0.95 : 0.12)));
+
     const cropLeft = Math.max(0, left - paddingX);
-    const cropTop = Math.max(0, top - paddingY);
+    const cropTop = Math.max(0, top - topPadding);
     const cropRight = Math.min(image.width - 1, right + paddingX);
-    const cropBottom = Math.min(image.height - 1, bottom + paddingY);
+    const cropBottom = Math.min(image.height - 1, bottom + bottomPadding);
     const cropWidth = cropRight - cropLeft + 1;
     const cropHeight = cropBottom - cropTop + 1;
 
@@ -394,7 +578,7 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
     const croppedImage = await rawImageFromBuffer(croppedBuffer, 'image/png');
     const backgroundRemover = await getBackgroundRemover();
     const cutoutImage = await backgroundRemover(croppedImage);
-    const refinedResult = refineCutoutMask(cutoutImage);
+    const refinedResult = refineCutoutMask(cutoutImage, normalizedGarmentType);
     const alphaBounds = refinedResult.bounds;
 
     if (!alphaBounds) {
