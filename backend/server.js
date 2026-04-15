@@ -34,21 +34,137 @@ function buildAnalysis(file) {
 
 async function removeImageBackground(imageBuffer) {
   try {
-    // Use sharp to process the image with transparency
-    // For now, we'll create a PNG with alpha channel support
-    // and use a simple approach of preserving transparency
-    const image = sharp(imageBuffer);
-    const metadata = await image.metadata();
-    
-    console.log('Processing image for background removal:', metadata);
-    
-    // Convert to PNG with 8-bit alpha to support transparency
-    const pngBuffer = await image
-      .ensureAlpha() // Ensure alpha channel exists
-      .png({ quality: 90 })
+    const image = sharp(imageBuffer).ensureAlpha();
+    const { data, info } = await image.raw().toBuffer({ resolveWithObject: true });
+
+    const channels = info.channels;
+    const width = info.width;
+    const height = info.height;
+
+    if (channels < 4) {
+      return image.png().toBuffer();
+    }
+
+    const borderBand = Math.max(4, Math.round(Math.min(width, height) * 0.03));
+    const background = [0, 0, 0];
+    let sampleCount = 0;
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const isBorderPixel =
+          x < borderBand ||
+          y < borderBand ||
+          x >= width - borderBand ||
+          y >= height - borderBand;
+
+        if (!isBorderPixel) continue;
+
+        const index = (y * width + x) * channels;
+        background[0] += data[index];
+        background[1] += data[index + 1];
+        background[2] += data[index + 2];
+        sampleCount += 1;
+      }
+    }
+
+    if (sampleCount === 0) {
+      return image.png().toBuffer();
+    }
+
+    background[0] = background[0] / sampleCount;
+    background[1] = background[1] / sampleCount;
+    background[2] = background[2] / sampleCount;
+
+    const threshold = 112;
+    const thresholdSquared = threshold * threshold;
+    const output = Buffer.from(data);
+    const visited = new Uint8Array(width * height);
+    const stack = [];
+
+    const isBackgroundPixel = (x, y) => {
+      const index = (y * width + x) * channels;
+      const red = data[index];
+      const green = data[index + 1];
+      const blue = data[index + 2];
+
+      const distanceSquared =
+        (red - background[0]) * (red - background[0]) +
+        (green - background[1]) * (green - background[1]) +
+        (blue - background[2]) * (blue - background[2]);
+
+      return distanceSquared <= thresholdSquared;
+    };
+
+    const pushIfBackground = (x, y) => {
+      if (x < 0 || y < 0 || x >= width || y >= height) return;
+      const index = y * width + x;
+      if (visited[index]) return;
+      if (!isBackgroundPixel(x, y)) return;
+      visited[index] = 1;
+      stack.push(index);
+    };
+
+    const isSkinTonePixel = (red, green, blue) => {
+      const maxChannel = Math.max(red, green, blue);
+      const minChannel = Math.min(red, green, blue);
+      const chroma = maxChannel - minChannel;
+
+      if (red < 85 || green < 35 || blue < 15) return false;
+      if (chroma < 10) return false;
+      if (Math.abs(red - green) < 12) return false;
+      if (red <= green || red <= blue) return false;
+
+      const saturation = maxChannel === 0 ? 0 : chroma / maxChannel;
+      return saturation > 0.08;
+    };
+
+    for (let x = 0; x < width; x += 1) {
+      pushIfBackground(x, 0);
+      pushIfBackground(x, height - 1);
+    }
+
+    for (let y = 0; y < height; y += 1) {
+      pushIfBackground(0, y);
+      pushIfBackground(width - 1, y);
+    }
+
+    while (stack.length > 0) {
+      const index = stack.pop();
+      const x = index % width;
+      const y = Math.floor(index / width);
+      const offset = index * channels;
+
+      output[offset + 3] = 0;
+
+      pushIfBackground(x + 1, y);
+      pushIfBackground(x - 1, y);
+      pushIfBackground(x, y + 1);
+      pushIfBackground(x, y - 1);
+    }
+
+    for (let offset = 0; offset < output.length; offset += channels) {
+      const red = output[offset];
+      const green = output[offset + 1];
+      const blue = output[offset + 2];
+      const alpha = output[offset + 3];
+
+      if (alpha === 0) continue;
+      if (red > 235 && green > 235 && blue > 235) continue;
+
+      if (isSkinTonePixel(red, green, blue)) {
+        output[offset + 3] = 0;
+      }
+    }
+
+    return sharp(output, {
+      raw: {
+        width,
+        height,
+        channels,
+      },
+    })
+      .png()
       .toBuffer();
-    
-    return pngBuffer;
   } catch (error) {
     console.error('Background removal failed:', error);
     // Return original buffer if processing fails

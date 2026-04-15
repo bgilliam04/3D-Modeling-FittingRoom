@@ -49,6 +49,8 @@ let camera = null;
 let renderer = null;
 let controls = null;
 let currentModel = null;
+let clothingPreviewJobId = 0;
+let currentClothingSizeValue = null;
 
 function initModelViewer() {
   if (!modelContainer) return;
@@ -146,6 +148,9 @@ function setClothingOverlay(file) {
 
   const reader = new FileReader();
   reader.onload = (event) => {
+    clothingOverlay.onload = () => {
+      applySelectedClothingSize();
+    };
     clothingOverlay.src = event.target.result;
     clothingOverlay.hidden = false;
     if (previewHint) {
@@ -153,6 +158,181 @@ function setClothingOverlay(file) {
     }
   };
   reader.readAsDataURL(file);
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Unable to read clothing image.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function imageElementFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Unable to load clothing image.'));
+    image.src = dataUrl;
+  });
+}
+
+async function createTransparentClothingDataUrl(dataUrl) {
+  const image = await imageElementFromDataUrl(dataUrl);
+
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+
+  canvas.width = image.naturalWidth || image.width;
+  canvas.height = image.naturalHeight || image.height;
+  context.drawImage(image, 0, 0);
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data, width, height } = imageData;
+
+  const borderBand = Math.max(4, Math.round(Math.min(width, height) * 0.03));
+  const background = [0, 0, 0];
+  let sampleCount = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const isBorderPixel =
+        x < borderBand ||
+        y < borderBand ||
+        x >= width - borderBand ||
+        y >= height - borderBand;
+
+      if (!isBorderPixel) continue;
+
+      const index = (y * width + x) * 4;
+      background[0] += data[index];
+      background[1] += data[index + 1];
+      background[2] += data[index + 2];
+      sampleCount += 1;
+    }
+  }
+
+  if (sampleCount === 0) {
+    return canvas.toDataURL('image/png');
+  }
+
+  background[0] /= sampleCount;
+  background[1] /= sampleCount;
+  background[2] /= sampleCount;
+
+  const threshold = 112;
+  const thresholdSquared = threshold * threshold;
+  const visited = new Uint8Array(canvas.width * canvas.height);
+  const stack = [];
+
+  const isBackgroundPixel = (x, y) => {
+    const index = (y * width + x) * 4;
+    const red = data[index];
+    const green = data[index + 1];
+    const blue = data[index + 2];
+
+    const distanceSquared =
+      (red - background[0]) * (red - background[0]) +
+      (green - background[1]) * (green - background[1]) +
+      (blue - background[2]) * (blue - background[2]);
+
+    return distanceSquared <= thresholdSquared;
+  };
+
+  const pushIfBackground = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const index = y * width + x;
+    if (visited[index]) return;
+    if (!isBackgroundPixel(x, y)) return;
+    visited[index] = 1;
+    stack.push(index);
+  };
+
+  const isSkinTonePixel = (red, green, blue) => {
+    const maxChannel = Math.max(red, green, blue);
+    const minChannel = Math.min(red, green, blue);
+    const chroma = maxChannel - minChannel;
+
+    if (red < 85 || green < 35 || blue < 15) return false;
+    if (chroma < 10) return false;
+    if (Math.abs(red - green) < 12) return false;
+    if (red <= green || red <= blue) return false;
+
+    const saturation = maxChannel === 0 ? 0 : chroma / maxChannel;
+    return saturation > 0.08;
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    pushIfBackground(x, 0);
+    pushIfBackground(x, height - 1);
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    pushIfBackground(0, y);
+    pushIfBackground(width - 1, y);
+  }
+
+  while (stack.length > 0) {
+    const index = stack.pop();
+    const x = index % width;
+    const y = Math.floor(index / width);
+    const offset = index * 4;
+
+    data[offset + 3] = 0;
+
+    pushIfBackground(x + 1, y);
+    pushIfBackground(x - 1, y);
+    pushIfBackground(x, y + 1);
+    pushIfBackground(x, y - 1);
+  }
+
+  for (let offset = 0; offset < data.length; offset += 4) {
+    const red = data[offset];
+    const green = data[offset + 1];
+    const blue = data[offset + 2];
+    const alpha = data[offset + 3];
+
+    if (alpha === 0) continue;
+    if (red > 235 && green > 235 && blue > 235) continue;
+
+    if (isSkinTonePixel(red, green, blue)) {
+      data[offset + 3] = 0;
+    }
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+async function loadTransparentClothingOverlay(file) {
+  if (!file || !clothingOverlay) return;
+
+  try {
+    const previewId = ++clothingPreviewJobId;
+    const dataUrl = await fileToDataUrl(file);
+    clothingOverlay.onload = () => {
+      applySelectedClothingSize();
+    };
+    clothingOverlay.src = dataUrl;
+    clothingOverlay.hidden = false;
+    if (previewHint) {
+      previewHint.hidden = true;
+    }
+
+    const transparentDataUrlPromise = createTransparentClothingDataUrl(dataUrl);
+    const transparentDataUrl = await transparentDataUrlPromise;
+    if (previewId === clothingPreviewJobId && transparentDataUrl) {
+      clothingOverlay.onload = () => {
+        applySelectedClothingSize();
+      };
+      clothingOverlay.src = transparentDataUrl;
+      clothingOverlay.hidden = false;
+    }
+  } catch (error) {
+    console.warn('Transparent clothing preview failed:', error.message);
+    setClothingOverlay(file);
+  }
 }
 
 function calculateImageWidth(sizeValue) {
@@ -188,6 +368,11 @@ function resizeClothingImage(sizeValue) {
   clothingOverlay.style.maxHeight = 'none';
 }
 
+function applySelectedClothingSize() {
+  if (currentClothingSizeValue === null || currentClothingSizeValue === undefined) return;
+  resizeClothingImage(currentClothingSizeValue);
+}
+
 function createSizeButton(size) {
   const button = document.createElement('button');
   button.type = 'button';
@@ -197,6 +382,7 @@ function createSizeButton(size) {
   button.addEventListener('click', () => {
     document.querySelectorAll('.size-button').forEach((btn) => btn.classList.remove('active'));
     button.classList.add('active');
+    currentClothingSizeValue = size.value;
     analyzeStatus.textContent = `Selected ${size.label} — ${size.value}`;
     resizeClothingImage(size.value);
   });
@@ -286,10 +472,10 @@ if (scanUpload) {
 }
 
 if (clothingUpload) {
-  clothingUpload.addEventListener('change', (event) => {
+  clothingUpload.addEventListener('change', async (event) => {
     const file = event.target.files[0];
     if (file) {
-      setClothingOverlay(file);
+      await loadTransparentClothingOverlay(file);
     }
   });
 }
@@ -412,14 +598,10 @@ if (analyzeButton) {
       console.log('Clothing result:', clothingResult);
       console.log('Size guide result:', sizeGuideResult);
 
-      // Update clothing overlay with processed image if available
       if (clothingResult.processedImageUrl) {
-        console.log('Using processed image for clothing overlay');
         clothingOverlay.src = clothingResult.processedImageUrl;
         clothingOverlay.hidden = false;
-        if (previewHint) {
-          previewHint.hidden = true;
-        }
+        applySelectedClothingSize();
       }
 
       analysisResults.innerHTML = `
