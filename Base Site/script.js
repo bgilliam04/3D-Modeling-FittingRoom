@@ -34,6 +34,7 @@ anchors.forEach((anchor) => {
 
 const scanUpload = document.getElementById('scanUpload');
 const clothingUpload = document.getElementById('clothingUpload');
+const garmentTypeSelect = document.getElementById('garmentTypeSelect');
 const sizeGuideUpload = document.getElementById('sizeGuideUpload');
 const analyzeButton = document.getElementById('analyzeButton');
 const analysisResults = document.getElementById('analysisResults');
@@ -51,6 +52,7 @@ let controls = null;
 let currentModel = null;
 let clothingPreviewJobId = 0;
 let currentClothingSizeValue = null;
+let currentGarmentCutout = null;
 
 function initModelViewer() {
   if (!modelContainer) return;
@@ -149,6 +151,10 @@ function setClothingOverlay(file) {
   const reader = new FileReader();
   reader.onload = (event) => {
     clothingOverlay.onload = () => {
+      currentGarmentCutout = {
+        width: clothingOverlay.naturalWidth || clothingOverlay.width || 0,
+        height: clothingOverlay.naturalHeight || clothingOverlay.height || 0,
+      };
       applySelectedClothingSize();
     };
     clothingOverlay.src = event.target.result;
@@ -160,179 +166,34 @@ function setClothingOverlay(file) {
   reader.readAsDataURL(file);
 }
 
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Unable to read clothing image.'));
-    reader.readAsDataURL(file);
-  });
-}
+function setCutoutOverlay(dataUrl, cutout = null) {
+  if (!clothingOverlay || !dataUrl) return;
 
-function imageElementFromDataUrl(dataUrl) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('Unable to load clothing image.'));
-    image.src = dataUrl;
-  });
-}
-
-async function createTransparentClothingDataUrl(dataUrl) {
-  const image = await imageElementFromDataUrl(dataUrl);
-
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-
-  canvas.width = image.naturalWidth || image.width;
-  canvas.height = image.naturalHeight || image.height;
-  context.drawImage(image, 0, 0);
-
-  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-  const { data, width, height } = imageData;
-
-  const borderBand = Math.max(4, Math.round(Math.min(width, height) * 0.03));
-  const background = [0, 0, 0];
-  let sampleCount = 0;
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const isBorderPixel =
-        x < borderBand ||
-        y < borderBand ||
-        x >= width - borderBand ||
-        y >= height - borderBand;
-
-      if (!isBorderPixel) continue;
-
-      const index = (y * width + x) * 4;
-      background[0] += data[index];
-      background[1] += data[index + 1];
-      background[2] += data[index + 2];
-      sampleCount += 1;
-    }
-  }
-
-  if (sampleCount === 0) {
-    return canvas.toDataURL('image/png');
-  }
-
-  background[0] /= sampleCount;
-  background[1] /= sampleCount;
-  background[2] /= sampleCount;
-
-  const threshold = 112;
-  const thresholdSquared = threshold * threshold;
-  const visited = new Uint8Array(canvas.width * canvas.height);
-  const stack = [];
-
-  const isBackgroundPixel = (x, y) => {
-    const index = (y * width + x) * 4;
-    const red = data[index];
-    const green = data[index + 1];
-    const blue = data[index + 2];
-
-    const distanceSquared =
-      (red - background[0]) * (red - background[0]) +
-      (green - background[1]) * (green - background[1]) +
-      (blue - background[2]) * (blue - background[2]);
-
-    return distanceSquared <= thresholdSquared;
-  };
-
-  const pushIfBackground = (x, y) => {
-    if (x < 0 || y < 0 || x >= width || y >= height) return;
-    const index = y * width + x;
-    if (visited[index]) return;
-    if (!isBackgroundPixel(x, y)) return;
-    visited[index] = 1;
-    stack.push(index);
-  };
-
-  const isSkinTonePixel = (red, green, blue) => {
-    const maxChannel = Math.max(red, green, blue);
-    const minChannel = Math.min(red, green, blue);
-    const chroma = maxChannel - minChannel;
-
-    if (red < 85 || green < 35 || blue < 15) return false;
-    if (chroma < 10) return false;
-    if (Math.abs(red - green) < 12) return false;
-    if (red <= green || red <= blue) return false;
-
-    const saturation = maxChannel === 0 ? 0 : chroma / maxChannel;
-    return saturation > 0.08;
-  };
-
-  for (let x = 0; x < width; x += 1) {
-    pushIfBackground(x, 0);
-    pushIfBackground(x, height - 1);
-  }
-
-  for (let y = 0; y < height; y += 1) {
-    pushIfBackground(0, y);
-    pushIfBackground(width - 1, y);
-  }
-
-  while (stack.length > 0) {
-    const index = stack.pop();
-    const x = index % width;
-    const y = Math.floor(index / width);
-    const offset = index * 4;
-
-    data[offset + 3] = 0;
-
-    pushIfBackground(x + 1, y);
-    pushIfBackground(x - 1, y);
-    pushIfBackground(x, y + 1);
-    pushIfBackground(x, y - 1);
-  }
-
-  for (let offset = 0; offset < data.length; offset += 4) {
-    const red = data[offset];
-    const green = data[offset + 1];
-    const blue = data[offset + 2];
-    const alpha = data[offset + 3];
-
-    if (alpha === 0) continue;
-    if (red > 235 && green > 235 && blue > 235) continue;
-
-    if (isSkinTonePixel(red, green, blue)) {
-      data[offset + 3] = 0;
-    }
-  }
-
-  context.putImageData(imageData, 0, 0);
-  return canvas.toDataURL('image/png');
-}
-
-async function loadTransparentClothingOverlay(file) {
-  if (!file || !clothingOverlay) return;
-
-  try {
-    const previewId = ++clothingPreviewJobId;
-    const dataUrl = await fileToDataUrl(file);
-    clothingOverlay.onload = () => {
-      applySelectedClothingSize();
+  clothingOverlay.onload = () => {
+    currentGarmentCutout = {
+      width:
+        cutout?.width ||
+        clothingOverlay.naturalWidth ||
+        clothingOverlay.width ||
+        0,
+      height:
+        cutout?.height ||
+        clothingOverlay.naturalHeight ||
+        clothingOverlay.height ||
+        0,
     };
-    clothingOverlay.src = dataUrl;
-    clothingOverlay.hidden = false;
-    if (previewHint) {
-      previewHint.hidden = true;
-    }
+    applySelectedClothingSize();
+  };
 
-    const transparentDataUrlPromise = createTransparentClothingDataUrl(dataUrl);
-    const transparentDataUrl = await transparentDataUrlPromise;
-    if (previewId === clothingPreviewJobId && transparentDataUrl) {
-      clothingOverlay.onload = () => {
-        applySelectedClothingSize();
-      };
-      clothingOverlay.src = transparentDataUrl;
-      clothingOverlay.hidden = false;
-    }
-  } catch (error) {
-    console.warn('Transparent clothing preview failed:', error.message);
-    setClothingOverlay(file);
+  clothingOverlay.src = dataUrl;
+  clothingOverlay.hidden = false;
+  if (previewHint) {
+    previewHint.hidden = true;
   }
+}
+
+function getSelectedGarmentType() {
+  return garmentTypeSelect?.value || 'shirt';
 }
 
 function calculateImageWidth(sizeValue) {
@@ -340,6 +201,10 @@ function calculateImageWidth(sizeValue) {
   if (!modelContainer) return 200; // Fallback if container not available
   
   const previewWidth = modelContainer.clientWidth;
+  const previewHeight = modelContainer.clientHeight;
+  const cutoutWidth = currentGarmentCutout?.width || clothingOverlay?.naturalWidth || 1;
+  const cutoutHeight = currentGarmentCutout?.height || clothingOverlay?.naturalHeight || 1;
+  const cutoutAspectRatio = cutoutWidth / Math.max(1, cutoutHeight);
   
   // Assume 20 inches is a reasonable reference width that should take up ~80% of preview
   // This makes smaller sizes (12-15") fit within the preview nicely
@@ -349,12 +214,17 @@ function calculateImageWidth(sizeValue) {
   const pixelsPerInch = (previewWidth * fillPercentage) / referenceWidth;
   const widthInPixels = Math.round(sizeValue * pixelsPerInch);
   
-  // Constrain to reasonable bounds (50px - 95% of preview width)
+  // Constrain to reasonable bounds and keep the scaled cutout inside the preview height.
   const minWidth = 50;
-  const maxWidth = Math.round(previewWidth * 0.95);
+  const maxWidthByContainer = Math.round(previewWidth * 0.95);
+  const maxHeightByContainer = Math.round(previewHeight * 0.92);
+  const maxWidthByCutoutHeight = Math.round(maxHeightByContainer * cutoutAspectRatio);
+  const maxWidth = Math.max(minWidth, Math.min(maxWidthByContainer, maxWidthByCutoutHeight));
   const constrainedWidth = Math.max(minWidth, Math.min(maxWidth, widthInPixels));
   
-  console.log(`Size ${sizeValue}" in ${previewWidth}px preview -> ${widthInPixels}px (constrained: ${constrainedWidth}px)`);
+  console.log(
+    `Size ${sizeValue}" in ${previewWidth}x${previewHeight}px preview with cutout ${cutoutWidth}x${cutoutHeight}px -> ${widthInPixels}px (constrained: ${constrainedWidth}px)`
+  );
   return constrainedWidth;
 }
 
@@ -475,15 +345,41 @@ if (clothingUpload) {
   clothingUpload.addEventListener('change', async (event) => {
     const file = event.target.files[0];
     if (file) {
-      await loadTransparentClothingOverlay(file);
+      clothingPreviewJobId += 1;
+      const previewId = clothingPreviewJobId;
+      const garmentType = getSelectedGarmentType();
+
+      try {
+        analyzeStatus.textContent = 'Cutting garment from clothing image...';
+        const clothingResult = await analyzeFile(file, 'clothing', garmentType);
+        if (previewId !== clothingPreviewJobId) return;
+
+        if (clothingResult.processedImageUrl) {
+          setCutoutOverlay(clothingResult.processedImageUrl, clothingResult.cutout);
+          analyzeStatus.textContent = 'Garment cutout ready.';
+        } else {
+          currentGarmentCutout = null;
+          setClothingOverlay(file);
+          analyzeStatus.textContent = 'Garment cutout unavailable, showing original image.';
+        }
+      } catch (error) {
+        console.warn('Garment cutout failed:', error.message);
+        if (previewId !== clothingPreviewJobId) return;
+        currentGarmentCutout = null;
+        setClothingOverlay(file);
+        analyzeStatus.textContent = 'Could not cut out garment. Showing original image.';
+      }
     }
   });
 }
 
-async function analyzeFile(file, type) {
+async function analyzeFile(file, type, garmentType = null) {
   const formData = new FormData();
   formData.append('image', file);
   formData.append('type', type);
+  if (garmentType) {
+    formData.append('garmentType', garmentType);
+  }
 
   const response = await fetch(`${BACKEND_URL}/analyze-image`, {
     method: 'POST',
@@ -581,6 +477,7 @@ if (analyzeButton) {
 
     const clothingFile = clothingUpload?.files[0];
     const sizeGuideFile = sizeGuideUpload?.files[0];
+    const garmentType = getSelectedGarmentType();
 
     if (!clothingFile || !sizeGuideFile) {
       analyzeStatus.textContent = 'Please upload both a clothing image and a size guide image.';
@@ -591,7 +488,7 @@ if (analyzeButton) {
 
     try {
       const [clothingResult, sizeGuideResult] = await Promise.all([
-        analyzeFile(clothingFile, 'clothing'),
+        analyzeFile(clothingFile, 'clothing', garmentType),
         analyzeFile(sizeGuideFile, 'sizeGuide'),
       ]);
 
@@ -599,9 +496,10 @@ if (analyzeButton) {
       console.log('Size guide result:', sizeGuideResult);
 
       if (clothingResult.processedImageUrl) {
-        clothingOverlay.src = clothingResult.processedImageUrl;
-        clothingOverlay.hidden = false;
-        applySelectedClothingSize();
+        setCutoutOverlay(clothingResult.processedImageUrl, clothingResult.cutout);
+      } else {
+        currentGarmentCutout = null;
+        setClothingOverlay(clothingFile);
       }
 
       analysisResults.innerHTML = `

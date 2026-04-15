@@ -212,15 +212,15 @@ p {
   object-fit: contain;
   pointer-events: auto;
   opacity: 0.9;
-  mix-blend-mode: screen;
+  mix-blend-mode: normal;
   cursor: grab;
-  border: 2px dashed rgba(255, 255, 255, 0.3);
-  border-radius: 4px;
-  transition: border-color 0.2s ease;
+  border: none;
+  border-radius: 0;
+  transition: none;
 }
 
 .clothing-overlay:hover {
-  border-color: rgba(255, 255, 255, 0.6);
+  border: none;
 }
 
 .clothing-overlay.dragging {

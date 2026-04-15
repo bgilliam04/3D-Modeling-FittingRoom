@@ -4,6 +4,7 @@ const multer = require('multer');
 const sizeOf = require('image-size');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
+const { pipeline, RawImage } = require('@huggingface/transformers');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -32,148 +33,894 @@ function buildAnalysis(file) {
   };
 }
 
-async function removeImageBackground(imageBuffer) {
-  try {
-    const image = sharp(imageBuffer).ensureAlpha();
-    const { data, info } = await image.raw().toBuffer({ resolveWithObject: true });
+const GARMENT_LABELS = {
+  shirt: ['shirt', 't-shirt', 'tee', 'top', 'blouse'],
+  tshirt: ['t-shirt', 'shirt', 'tee', 'top'],
+  dress: ['dress', 'gown', 'frock'],
+  pants: ['pants', 'trousers', 'jeans', 'slacks', 'leggings'],
+  shorts: ['shorts', 'short pants'],
+  skirt: ['skirt'],
+  jacket: ['jacket', 'coat', 'blazer', 'hoodie', 'cardigan'],
+  hoodie: ['hoodie', 'sweatshirt'],
+  sweater: ['sweater', 'jumper', 'pullover', 'cardigan'],
+  suit: ['suit', 'blazer'],
+  coat: ['coat', 'overcoat', 'trench coat'],
+  blouse: ['blouse', 'shirt', 'top'],
+  romper: ['romper', 'jumpsuit'],
+  jumpsuit: ['jumpsuit', 'romper'],
+};
 
-    const channels = info.channels;
-    const width = info.width;
-    const height = info.height;
+function getCandidateLabelsForGarment(garmentType) {
+  return GARMENT_LABELS[garmentType] || GARMENT_LABELS.shirt;
+}
 
-    if (channels < 4) {
-      return image.png().toBuffer();
+function normalizeGarmentType(garmentType) {
+  if (!garmentType || typeof garmentType !== 'string') {
+    return 'shirt';
+  }
+
+  const normalized = garmentType.toLowerCase().trim();
+  return Object.prototype.hasOwnProperty.call(GARMENT_LABELS, normalized) ? normalized : 'shirt';
+}
+
+let garmentDetectorPromise = null;
+let backgroundRemoverPromise = null;
+
+async function getGarmentDetector() {
+  if (!garmentDetectorPromise) {
+    garmentDetectorPromise = pipeline('zero-shot-object-detection', 'Xenova/owlvit-base-patch32', {
+      dtype: 'q8',
+    });
+  }
+
+  return garmentDetectorPromise;
+}
+
+async function getBackgroundRemover() {
+  if (!backgroundRemoverPromise) {
+    backgroundRemoverPromise = pipeline('background-removal', 'Xenova/modnet', {
+      dtype: 'q8',
+    });
+  }
+
+  return backgroundRemoverPromise;
+}
+
+async function rawImageFromBuffer(buffer, mimeType) {
+  return RawImage.read(new Blob([buffer], { type: mimeType || 'image/png' }));
+}
+
+function rawImageToPngBuffer(rawImage) {
+  return sharp(Buffer.from(rawImage.data), {
+    raw: {
+      width: rawImage.width,
+      height: rawImage.height,
+      channels: rawImage.channels,
+    },
+  })
+    .png()
+    .toBuffer();
+}
+
+function findAlphaBounds(rawImage) {
+  if (!rawImage || rawImage.channels < 4) {
+    return null;
+  }
+
+  const { data, width, height, channels } = rawImage;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * channels;
+      if (data[offset + 3] === 0) continue;
+
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
     }
+  }
 
-    const borderBand = Math.max(4, Math.round(Math.min(width, height) * 0.03));
-    const background = [0, 0, 0];
-    let sampleCount = 0;
+  if (maxX < minX || maxY < minY) {
+    return null;
+  }
 
-    for (let y = 0; y < height; y += 1) {
-      for (let x = 0; x < width; x += 1) {
-        const isBorderPixel =
-          x < borderBand ||
-          y < borderBand ||
-          x >= width - borderBand ||
-          y >= height - borderBand;
+  return {
+    left: minX,
+    top: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
+}
 
-        if (!isBorderPixel) continue;
+function refineCutoutMask(rawImage) {
+  if (!rawImage || rawImage.channels < 4) {
+    return { image: rawImage, bounds: findAlphaBounds(rawImage) };
+  }
 
-        const index = (y * width + x) * channels;
-        background[0] += data[index];
-        background[1] += data[index + 1];
-        background[2] += data[index + 2];
-        sampleCount += 1;
+  const width = rawImage.width;
+  const height = rawImage.height;
+  const channels = rawImage.channels;
+  const source = rawImage.data;
+  const data = new Uint8ClampedArray(source.length);
+  data.set(source);
+
+  // Harden the matte so low-confidence background haze becomes transparent.
+  const alphaThreshold = 96;
+  for (let i = 3; i < data.length; i += channels) {
+    if (data[i] < alphaThreshold) {
+      data[i] = 0;
+    }
+  }
+
+  const mask = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * channels;
+      if (data[offset + 3] > 0) {
+        mask[index] = 1;
+      }
+    }
+  }
+
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const selectMainComponent = (sourceMask, focusX, focusY) => {
+    const visited = new Uint8Array(width * height);
+    const maxDistance = Math.max(1, Math.hypot(width / 2, height / 2));
+    const queue = [];
+    let queueHead = 0;
+    let selectedPixels = null;
+    let selectedScore = -Infinity;
+
+    for (let start = 0; start < sourceMask.length; start += 1) {
+      if (!sourceMask[start] || visited[start]) continue;
+
+      visited[start] = 1;
+      queue.length = 0;
+      queueHead = 0;
+      queue.push(start);
+
+      const componentPixels = [];
+      let area = 0;
+      let sumX = 0;
+      let sumY = 0;
+
+      while (queueHead < queue.length) {
+        const current = queue[queueHead++];
+        componentPixels.push(current);
+        area += 1;
+
+        const x = current % width;
+        const y = Math.floor(current / width);
+        sumX += x;
+        sumY += y;
+
+        const neighbors = [
+          [x + 1, y],
+          [x - 1, y],
+          [x, y + 1],
+          [x, y - 1],
+        ];
+
+        for (const [nx, ny] of neighbors) {
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const nIndex = ny * width + nx;
+          if (!sourceMask[nIndex] || visited[nIndex]) continue;
+          visited[nIndex] = 1;
+          queue.push(nIndex);
+        }
+      }
+
+      const centroidX = sumX / area;
+      const centroidY = sumY / area;
+      const distance = Math.hypot(centroidX - focusX, centroidY - focusY) / maxDistance;
+      const score = area * (1 - Math.min(0.9, distance));
+
+      if (score > selectedScore) {
+        selectedScore = score;
+        selectedPixels = componentPixels;
       }
     }
 
-    if (sampleCount === 0) {
-      return image.png().toBuffer();
+    const keepMask = new Uint8Array(width * height);
+    if (selectedPixels) {
+      for (const pixelIndex of selectedPixels) {
+        keepMask[pixelIndex] = 1;
+      }
     }
 
-    background[0] = background[0] / sampleCount;
-    background[1] = background[1] / sampleCount;
-    background[2] = background[2] / sampleCount;
+    return keepMask;
+  };
 
-    const threshold = 112;
-    const thresholdSquared = threshold * threshold;
-    const output = Buffer.from(data);
-    const visited = new Uint8Array(width * height);
-    const stack = [];
+  const keepMask = selectMainComponent(mask, centerX, centerY);
 
-    const isBackgroundPixel = (x, y) => {
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (keepMask[index]) continue;
+      const offset = index * channels;
+      data[offset + 3] = 0;
+    }
+  }
+
+  // Second pass: trim weak alpha remnants then keep the strongest remaining component again.
+  const secondPassAlphaThreshold = 144;
+  const secondMask = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * channels;
+
+      if (!keepMask[index] || data[offset + 3] < secondPassAlphaThreshold) {
+        data[offset + 3] = 0;
+        continue;
+      }
+
+      secondMask[index] = 1;
+    }
+  }
+
+  const secondKeepMask = selectMainComponent(secondMask, centerX, centerY);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (secondKeepMask[index]) continue;
+      const offset = index * channels;
+      data[offset + 3] = 0;
+    }
+  }
+
+  // Garment-only hardening: remove any remaining foreground connected to image borders.
+  const borderConnected = new Uint8Array(width * height);
+  const queue = [];
+  let queueHead = 0;
+
+  const enqueueBorderConnected = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const index = y * width + x;
+    if (borderConnected[index]) return;
+    const offset = index * channels;
+    if (data[offset + 3] === 0) return;
+
+    borderConnected[index] = 1;
+    queue.push(index);
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    enqueueBorderConnected(x, 0);
+    enqueueBorderConnected(x, height - 1);
+  }
+  for (let y = 0; y < height; y += 1) {
+    enqueueBorderConnected(0, y);
+    enqueueBorderConnected(width - 1, y);
+  }
+
+  while (queueHead < queue.length) {
+    const current = queue[queueHead++];
+    const x = current % width;
+    const y = Math.floor(current / width);
+
+    enqueueBorderConnected(x + 1, y);
+    enqueueBorderConnected(x - 1, y);
+    enqueueBorderConnected(x, y + 1);
+    enqueueBorderConnected(x, y - 1);
+  }
+
+  const borderCleanMask = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * channels;
+      if (data[offset + 3] === 0 || borderConnected[index]) {
+        data[offset + 3] = 0;
+        continue;
+      }
+      borderCleanMask[index] = 1;
+    }
+  }
+
+  const finalKeepMask = selectMainComponent(borderCleanMask, centerX, centerY);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (finalKeepMask[index]) continue;
+      const offset = index * channels;
+      data[offset + 3] = 0;
+    }
+  }
+
+  const refined = new RawImage(data, width, height, 4);
+  return {
+    image: refined,
+    bounds: findAlphaBounds(refined),
+  };
+}
+
+async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '') {
+  const normalizedGarmentType = normalizeGarmentType(garmentType);
+  const candidateLabels = getCandidateLabelsForGarment(normalizedGarmentType);
+
+  try {
+    const orientedBuffer = await sharp(buffer).rotate().png().toBuffer();
+    const image = await rawImageFromBuffer(orientedBuffer, 'image/png');
+    const detector = await getGarmentDetector();
+    const detections = await detector(image, candidateLabels, { threshold: 0.08, top_k: 5 });
+
+    if (!detections || detections.length === 0) {
+      throw new Error('No garment detected.');
+    }
+
+    const bestDetection = detections
+      .slice()
+      .sort((a, b) => b.score - a.score)
+      .find((detection) => detection?.box);
+
+    if (!bestDetection) {
+      throw new Error('No garment bounding box found.');
+    }
+
+    const { xmin, ymin, xmax, ymax } = bestDetection.box;
+    const left = Math.max(0, Math.floor(xmin));
+    const top = Math.max(0, Math.floor(ymin));
+    const right = Math.min(image.width - 1, Math.ceil(xmax));
+    const bottom = Math.min(image.height - 1, Math.ceil(ymax));
+
+    if (right <= left || bottom <= top) {
+      throw new Error('Invalid garment detection bounds.');
+    }
+
+    const boxWidth = right - left + 1;
+    const boxHeight = bottom - top + 1;
+    const paddingX = Math.max(8, Math.round(boxWidth * 0.12));
+    const paddingY = Math.max(8, Math.round(boxHeight * 0.12));
+    const cropLeft = Math.max(0, left - paddingX);
+    const cropTop = Math.max(0, top - paddingY);
+    const cropRight = Math.min(image.width - 1, right + paddingX);
+    const cropBottom = Math.min(image.height - 1, bottom + paddingY);
+    const cropWidth = cropRight - cropLeft + 1;
+    const cropHeight = cropBottom - cropTop + 1;
+
+    const croppedBuffer = await sharp(orientedBuffer)
+      .extract({ left: cropLeft, top: cropTop, width: cropWidth, height: cropHeight })
+      .png()
+      .toBuffer();
+
+    const croppedImage = await rawImageFromBuffer(croppedBuffer, 'image/png');
+    const backgroundRemover = await getBackgroundRemover();
+    const cutoutImage = await backgroundRemover(croppedImage);
+    const refinedResult = refineCutoutMask(cutoutImage);
+    const alphaBounds = refinedResult.bounds;
+
+    if (!alphaBounds) {
+      // Never return a raw crop when no garment mask exists.
+      return createHeuristicGarmentCutout(croppedBuffer);
+    }
+
+    const cutoutBuffer = await sharp(Buffer.from(refinedResult.image.data), {
+      raw: {
+        width: refinedResult.image.width,
+        height: refinedResult.image.height,
+        channels: refinedResult.image.channels,
+      },
+    })
+      .extract(alphaBounds)
+      .png()
+      .toBuffer();
+
+    return {
+      pngDataUrl: `data:image/png;base64,${cutoutBuffer.toString('base64')}`,
+      cutout: {
+        width: alphaBounds.width,
+        height: alphaBounds.height,
+        offsetX: cropLeft + alphaBounds.left,
+        offsetY: cropTop + alphaBounds.top,
+      },
+    };
+  } catch (error) {
+    console.warn('Model-based garment cutout failed, falling back to heuristic cutout:', error.message);
+    return createHeuristicGarmentCutout(buffer);
+  }
+}
+
+async function createHeuristicGarmentCutout(buffer) {
+  const { data, info } = await sharp(buffer)
+    .rotate()
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const { width, height } = info;
+  const channels = info.channels;
+
+  if (channels < 4 || width < 2 || height < 2) {
+    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
+    return {
+      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
+      cutout: {
+        width,
+        height,
+        offsetX: 0,
+        offsetY: 0,
+      },
+    };
+  }
+
+  const borderBand = Math.max(8, Math.round(Math.min(width, height) * 0.08));
+  const quantizationSize = 16;
+  const colorBuckets = new Map();
+  const borderDistances = [];
+
+  const quantizeChannel = (value) => Math.floor(value / quantizationSize) * quantizationSize;
+  const makeBucketKey = (red, green, blue) => `${quantizeChannel(red)}|${quantizeChannel(green)}|${quantizeChannel(blue)}`;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const isBorderPixel =
+        x < borderBand ||
+        y < borderBand ||
+        x >= width - borderBand ||
+        y >= height - borderBand;
+
+      if (!isBorderPixel) continue;
+
       const index = (y * width + x) * channels;
       const red = data[index];
       const green = data[index + 1];
       const blue = data[index + 2];
+      const key = makeBucketKey(red, green, blue);
+      const bucket = colorBuckets.get(key) || { count: 0, red: 0, green: 0, blue: 0 };
 
-      const distanceSquared =
-        (red - background[0]) * (red - background[0]) +
-        (green - background[1]) * (green - background[1]) +
-        (blue - background[2]) * (blue - background[2]);
-
-      return distanceSquared <= thresholdSquared;
-    };
-
-    const pushIfBackground = (x, y) => {
-      if (x < 0 || y < 0 || x >= width || y >= height) return;
-      const index = y * width + x;
-      if (visited[index]) return;
-      if (!isBackgroundPixel(x, y)) return;
-      visited[index] = 1;
-      stack.push(index);
-    };
-
-    const isSkinTonePixel = (red, green, blue) => {
-      const maxChannel = Math.max(red, green, blue);
-      const minChannel = Math.min(red, green, blue);
-      const chroma = maxChannel - minChannel;
-
-      if (red < 85 || green < 35 || blue < 15) return false;
-      if (chroma < 10) return false;
-      if (Math.abs(red - green) < 12) return false;
-      if (red <= green || red <= blue) return false;
-
-      const saturation = maxChannel === 0 ? 0 : chroma / maxChannel;
-      return saturation > 0.08;
-    };
-
-    for (let x = 0; x < width; x += 1) {
-      pushIfBackground(x, 0);
-      pushIfBackground(x, height - 1);
+      bucket.count += 1;
+      bucket.red += red;
+      bucket.green += green;
+      bucket.blue += blue;
+      colorBuckets.set(key, bucket);
     }
+  }
 
-    for (let y = 0; y < height; y += 1) {
-      pushIfBackground(0, y);
-      pushIfBackground(width - 1, y);
-    }
+  let background = [255, 255, 255];
+  if (colorBuckets.size > 0) {
+    let dominantBucket = null;
 
-    while (stack.length > 0) {
-      const index = stack.pop();
-      const x = index % width;
-      const y = Math.floor(index / width);
-      const offset = index * channels;
-
-      output[offset + 3] = 0;
-
-      pushIfBackground(x + 1, y);
-      pushIfBackground(x - 1, y);
-      pushIfBackground(x, y + 1);
-      pushIfBackground(x, y - 1);
-    }
-
-    for (let offset = 0; offset < output.length; offset += channels) {
-      const red = output[offset];
-      const green = output[offset + 1];
-      const blue = output[offset + 2];
-      const alpha = output[offset + 3];
-
-      if (alpha === 0) continue;
-      if (red > 235 && green > 235 && blue > 235) continue;
-
-      if (isSkinTonePixel(red, green, blue)) {
-        output[offset + 3] = 0;
+    for (const bucket of colorBuckets.values()) {
+      if (!dominantBucket || bucket.count > dominantBucket.count) {
+        dominantBucket = bucket;
       }
     }
 
-    return sharp(output, {
-      raw: {
-        width,
-        height,
-        channels,
-      },
-    })
-      .png()
-      .toBuffer();
-  } catch (error) {
-    console.error('Background removal failed:', error);
-    // Return original buffer if processing fails
-    return imageBuffer;
+    if (dominantBucket) {
+      background = [
+        dominantBucket.red / dominantBucket.count,
+        dominantBucket.green / dominantBucket.count,
+        dominantBucket.blue / dominantBucket.count,
+      ];
+    }
   }
-}
 
-function convertToDataUrl(buffer) {
-  return `data:image/png;base64,${buffer.toString('base64')}`;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const isBorderPixel =
+        x < borderBand ||
+        y < borderBand ||
+        x >= width - borderBand ||
+        y >= height - borderBand;
+
+      if (!isBorderPixel) continue;
+
+      const index = (y * width + x) * channels;
+      const red = data[index];
+      const green = data[index + 1];
+      const blue = data[index + 2];
+      const distance = Math.sqrt(
+        (red - background[0]) * (red - background[0]) +
+        (green - background[1]) * (green - background[1]) +
+        (blue - background[2]) * (blue - background[2])
+      );
+
+      borderDistances.push(distance);
+    }
+  }
+
+  borderDistances.sort((a, b) => a - b);
+  const thresholdIndex = Math.min(borderDistances.length - 1, Math.max(0, Math.floor(borderDistances.length * 0.9)));
+  const adaptiveThreshold = borderDistances.length > 0 ? borderDistances[thresholdIndex] + 10 : 72;
+
+  const threshold = Math.max(42, Math.min(150, adaptiveThreshold));
+  const thresholdSquared = threshold * threshold;
+  const visited = new Uint8Array(width * height);
+  const queue = [];
+  let queueHead = 0;
+
+  const isLikelyBackground = (x, y) => {
+    const index = (y * width + x) * channels;
+    const red = data[index];
+    const green = data[index + 1];
+    const blue = data[index + 2];
+
+    const distanceSquared =
+      (red - background[0]) * (red - background[0]) +
+      (green - background[1]) * (green - background[1]) +
+      (blue - background[2]) * (blue - background[2]);
+
+    return distanceSquared <= thresholdSquared;
+  };
+
+  const enqueueIfBackground = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const idx = y * width + x;
+    if (visited[idx]) return;
+    if (!isLikelyBackground(x, y)) return;
+
+    visited[idx] = 1;
+    queue.push(idx);
+  };
+
+  const isSkinTonePixel = (red, green, blue) => {
+    const maxChannel = Math.max(red, green, blue);
+    const minChannel = Math.min(red, green, blue);
+    const chroma = maxChannel - minChannel;
+
+    if (red < 95 || green < 40 || blue < 20) return false;
+    if (chroma < 12) return false;
+    if (Math.abs(red - green) < 18) return false;
+    if (red <= green || red <= blue) return false;
+
+    const saturation = maxChannel === 0 ? 0 : chroma / maxChannel;
+    return saturation > 0.08;
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    enqueueIfBackground(x, 0);
+    enqueueIfBackground(x, height - 1);
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    enqueueIfBackground(0, y);
+    enqueueIfBackground(width - 1, y);
+  }
+
+  while (queueHead < queue.length) {
+    const current = queue[queueHead++];
+    const x = current % width;
+    const y = Math.floor(current / width);
+
+    enqueueIfBackground(x + 1, y);
+    enqueueIfBackground(x - 1, y);
+    enqueueIfBackground(x, y + 1);
+    enqueueIfBackground(x, y - 1);
+  }
+
+  const outputRaw = Buffer.from(data);
+  const foregroundMask = new Uint8Array(width * height);
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const maxCenterDistance = Math.hypot(centerX, centerY);
+  const components = [];
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixelIndex = y * width + x;
+      const offset = pixelIndex * channels;
+
+      if (visited[pixelIndex] || outputRaw[offset + 3] === 0) continue;
+      foregroundMask[pixelIndex] = 1;
+    }
+  }
+
+  const componentVisited = new Uint8Array(width * height);
+  const componentQueue = [];
+  let componentQueueHead = 0;
+
+  for (let startIndex = 0; startIndex < foregroundMask.length; startIndex += 1) {
+    if (!foregroundMask[startIndex] || componentVisited[startIndex]) continue;
+
+    componentVisited[startIndex] = 1;
+    componentQueue.length = 0;
+    componentQueueHead = 0;
+    componentQueue.push(startIndex);
+
+    let area = 0;
+    let sumX = 0;
+    let sumY = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+    const pixels = [];
+
+    while (componentQueueHead < componentQueue.length) {
+      const current = componentQueue[componentQueueHead++];
+      const x = current % width;
+      const y = Math.floor(current / width);
+
+      area += 1;
+      sumX += x;
+      sumY += y;
+      pixels.push(current);
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+
+      const neighbors = [
+        [x + 1, y],
+        [x - 1, y],
+        [x, y + 1],
+        [x, y - 1],
+      ];
+
+      for (const [nextX, nextY] of neighbors) {
+        if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) continue;
+
+        const nextIndex = nextY * width + nextX;
+        if (!foregroundMask[nextIndex] || componentVisited[nextIndex]) continue;
+
+        componentVisited[nextIndex] = 1;
+        componentQueue.push(nextIndex);
+      }
+    }
+
+    const centroidX = sumX / area;
+    const centroidY = sumY / area;
+    const centerDistance = Math.hypot(centroidX - centerX, centroidY - centerY);
+    const normalizedCenterDistance = maxCenterDistance === 0 ? 1 : centerDistance / maxCenterDistance;
+    const widthSpan = maxX - minX + 1;
+    const heightSpan = maxY - minY + 1;
+    const aspectPenalty = widthSpan > 0 && heightSpan > 0 ? Math.abs(Math.log(widthSpan / heightSpan)) * 0.05 : 0;
+    const touchesBorder = minX === 0 || minY === 0 || maxX === width - 1 || maxY === height - 1;
+    const borderPenalty = touchesBorder ? 0.22 : 0;
+    const centerWeight = Math.max(0.18, 1 - normalizedCenterDistance * 1.2);
+    const score = area * centerWeight * (1 - aspectPenalty - borderPenalty);
+
+    components.push({
+      area,
+      score,
+      minX,
+      minY,
+      maxX,
+      maxY,
+      centroidX,
+      centroidY,
+      pixels,
+    });
+  }
+
+  if (components.length === 0) {
+    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
+    const fallbackSize = sizeOf(fallbackPngBuffer);
+    return {
+      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
+      cutout: {
+        width: fallbackSize.width || width,
+        height: fallbackSize.height || height,
+        offsetX: 0,
+        offsetY: 0,
+      },
+    };
+  }
+
+  components.sort((a, b) => b.score - a.score || b.area - a.area);
+  const selected = components[0];
+  const selectedMask = new Uint8Array(width * height);
+
+  for (const pixelIndex of selected.pixels) {
+    selectedMask[pixelIndex] = 1;
+  }
+
+  if (selected.pixels.length === 0) {
+    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
+    const fallbackSize = sizeOf(fallbackPngBuffer);
+    return {
+      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
+      cutout: {
+        width: fallbackSize.width || width,
+        height: fallbackSize.height || height,
+        offsetX: 0,
+        offsetY: 0,
+      },
+    };
+  }
+
+  const wearerMask = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixelIndex = y * width + x;
+      const offset = pixelIndex * channels;
+
+      if (!selectedMask[pixelIndex] || outputRaw[offset + 3] === 0) continue;
+
+      if (isSkinTonePixel(outputRaw[offset], outputRaw[offset + 1], outputRaw[offset + 2])) {
+        wearerMask[pixelIndex] = 1;
+      }
+    }
+  }
+
+  const wearerExpansionPasses = 3;
+  for (let pass = 0; pass < wearerExpansionPasses; pass += 1) {
+    const expandedMask = new Uint8Array(width * height);
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const pixelIndex = y * width + x;
+        if (!wearerMask[pixelIndex]) continue;
+
+        expandedMask[pixelIndex] = 1;
+        if (x > 0) expandedMask[pixelIndex - 1] = 1;
+        if (x < width - 1) expandedMask[pixelIndex + 1] = 1;
+        if (y > 0) expandedMask[pixelIndex - width] = 1;
+        if (y < height - 1) expandedMask[pixelIndex + width] = 1;
+      }
+    }
+
+    wearerMask.set(expandedMask);
+  }
+
+  const baseMask = new Uint8Array(width * height);
+  const rowCounts = new Array(height).fill(0);
+  const columnCounts = new Array(width).fill(0);
+  let baseArea = 0;
+  let baseSumX = 0;
+  let baseSumY = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixelIndex = y * width + x;
+      const offset = pixelIndex * channels;
+
+      if (!selectedMask[pixelIndex] || wearerMask[pixelIndex]) continue;
+      if (outputRaw[offset + 3] === 0) continue;
+
+      baseMask[pixelIndex] = 1;
+      rowCounts[y] += 1;
+      columnCounts[x] += 1;
+      baseArea += 1;
+      baseSumX += x;
+      baseSumY += y;
+    }
+  }
+
+  if (baseArea === 0) {
+    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
+    const fallbackSize = sizeOf(fallbackPngBuffer);
+    return {
+      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
+      cutout: {
+        width: fallbackSize.width || width,
+        height: fallbackSize.height || height,
+        offsetX: 0,
+        offsetY: 0,
+      },
+    };
+  }
+
+  const rowPeak = Math.max(...rowCounts);
+  const columnPeak = Math.max(...columnCounts);
+  const rowThreshold = Math.max(2, Math.round(rowPeak * 0.14));
+  const columnThreshold = Math.max(2, Math.round(columnPeak * 0.14));
+  const centroidX = baseSumX / baseArea;
+  const centroidY = baseSumY / baseArea;
+
+  let top = 0;
+  let bottom = height - 1;
+  let left = 0;
+  let right = width - 1;
+
+  let peakRow = 0;
+  let peakColumn = 0;
+  for (let i = 0; i < height; i += 1) {
+    if (rowCounts[i] >= rowPeak) {
+      peakRow = i;
+      break;
+    }
+  }
+
+  for (let i = 0; i < width; i += 1) {
+    if (columnCounts[i] >= columnPeak) {
+      peakColumn = i;
+      break;
+    }
+  }
+
+  top = peakRow;
+  while (top > 0 && rowCounts[top - 1] >= rowThreshold) top -= 1;
+  bottom = peakRow;
+  while (bottom < height - 1 && rowCounts[bottom + 1] >= rowThreshold) bottom += 1;
+  left = peakColumn;
+  while (left > 0 && columnCounts[left - 1] >= columnThreshold) left -= 1;
+  right = peakColumn;
+  while (right < width - 1 && columnCounts[right + 1] >= columnThreshold) right += 1;
+
+  const padding = Math.max(2, Math.round(Math.min(width, height) * 0.02));
+  top = Math.max(0, top - padding);
+  bottom = Math.min(height - 1, bottom + padding);
+  left = Math.max(0, left - padding);
+  right = Math.min(width - 1, right + padding);
+
+  const coreMask = new Uint8Array(width * height);
+  const coreRadiusX = Math.max(1, (right - left + 1) / 2);
+  const coreRadiusY = Math.max(1, (bottom - top + 1) / 2);
+  const ellipseScale = 1.08;
+
+  for (let y = top; y <= bottom; y += 1) {
+    for (let x = left; x <= right; x += 1) {
+      const pixelIndex = y * width + x;
+      if (!baseMask[pixelIndex]) continue;
+
+      const normalizedX = (x - centroidX) / (coreRadiusX * ellipseScale);
+      const normalizedY = (y - centroidY) / (coreRadiusY * ellipseScale);
+      if ((normalizedX * normalizedX) + (normalizedY * normalizedY) <= 1) {
+        coreMask[pixelIndex] = 1;
+      }
+    }
+  }
+
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixelIndex = y * width + x;
+      const offset = pixelIndex * channels;
+
+      if (!coreMask[pixelIndex]) {
+        outputRaw[offset + 3] = 0;
+        continue;
+      }
+
+      if (outputRaw[offset + 3] > 0) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < minX || maxY < minY) {
+    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
+    const fallbackSize = sizeOf(fallbackPngBuffer);
+    return {
+      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
+      cutout: {
+        width: fallbackSize.width || width,
+        height: fallbackSize.height || height,
+        offsetX: 0,
+        offsetY: 0,
+      },
+    };
+  }
+
+  const cropWidth = maxX - minX + 1;
+  const cropHeight = maxY - minY + 1;
+
+  const croppedPngBuffer = await sharp(outputRaw, {
+    raw: {
+      width,
+      height,
+      channels,
+    },
+  })
+    .extract({ left: minX, top: minY, width: cropWidth, height: cropHeight })
+    .png()
+    .toBuffer();
+
+  return {
+    pngDataUrl: `data:image/png;base64,${croppedPngBuffer.toString('base64')}`,
+    cutout: {
+      width: cropWidth,
+      height: cropHeight,
+      offsetX: minX,
+      offsetY: minY,
+    },
+  };
 }
 
 function parseSizeGuideText(text) {
@@ -352,22 +1099,24 @@ app.post('/analyze-image', upload.single('image'), async (req, res) => {
     
     let sizes = [];
     let processedImageUrl = null;
+    let cutout = null;
     
     if (req.body.type === 'sizeGuide') {
       console.log('Processing as size guide...');
       sizes = await parseSizeGuideImage(req.file);
       console.log('Size guide processing complete. Sizes:', sizes);
     } else if (req.body.type === 'clothing') {
-      console.log('Processing as clothing image with background removal...');
-      const processedBuffer = await removeImageBackground(req.file.buffer);
-      processedImageUrl = convertToDataUrl(processedBuffer);
-      console.log('Background removal complete');
+      console.log('Processing as clothing cutout...');
+      const cutoutResult = await createGarmentCutout(req.file.buffer, req.body.garmentType, req.file.mimetype);
+      processedImageUrl = cutoutResult.pngDataUrl;
+      cutout = cutoutResult.cutout;
+      console.log('Clothing cutout complete:', cutout);
     } else {
       console.log('Processing as generic image');
     }
     
-    console.log('Sending response:', { success: true, analysis, sizes, processedImageUrl: processedImageUrl ? 'included' : 'none' });
-    res.json({ success: true, analysis, sizes, processedImageUrl });
+    console.log('Sending response:', { success: true, analysis, sizes, hasCutout: Boolean(processedImageUrl) });
+    res.json({ success: true, analysis, sizes, processedImageUrl, cutout });
   } catch (error) {
     console.error('Image analysis failed:', error);
     res.status(500).json({ error: 'Failed to analyze image.', details: error.message });

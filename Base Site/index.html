@@ -64,6 +64,22 @@
             <input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" />
             <span class="upload-help">Allowed file types: .png, .jpg, .jpeg.</span>
           </label>
+          <label class="upload-label" style="margin-top: 1rem;">
+            Garment Type
+            <select id="garmentTypeSelect">
+              <option value="shirt">Shirt / Top</option>
+              <option value="dress">Dress</option>
+              <option value="pants">Pants / Trousers</option>
+              <option value="shorts">Shorts</option>
+              <option value="skirt">Skirt</option>
+              <option value="jacket">Jacket / Coat</option>
+              <option value="hoodie">Hoodie</option>
+              <option value="sweater">Sweater</option>
+              <option value="suit">Suit / Blazer</option>
+              <option value="romper">Romper / Jumpsuit</option>
+            </select>
+            <span class="upload-help">Pick the garment type to guide cutout detection.</span>
+          </label>
         </article>
         <article class="upload-card">
           <label class="upload-label">
@@ -118,7 +134,7 @@
   </main>
 
   <footer class="site-footer">
-    <p>© 2026 FittingRoom 3D. Built for immersive online fitting experiences.</p>
+    <p>2026 fitting room. This website's backend is made using AI via professors' directions; however the design and idea have been made by a team of students for "Start Up Term".</p>
   </footer>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/three.min.js"></script>
