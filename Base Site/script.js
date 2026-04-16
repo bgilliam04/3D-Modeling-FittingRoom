@@ -271,19 +271,93 @@ function createSizeButton(size) {
   return button;
 }
 
+function normalizeSizeLabel(label) {
+  return String(label || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[.,:;()\[\]{}]/g, '')
+    .replace(/\s+/g, '')
+    .replace(/(\d+)X[-_\s]*L/g, '$1XL')
+    .replace(/X[-_\s.]*L/g, 'XL')
+    .replace(/^(\d+)XL$/, '$1XL')
+    .replace(/^(\d+)T$/, '$1T');
+}
+
+function dedupeSizes(sizes) {
+  const uniqueSizes = [];
+  const seenLabels = new Set();
+
+  for (const size of sizes || []) {
+    if (!size || typeof size.value === 'undefined' || !size.label) {
+      continue;
+    }
+
+    const labelKey = normalizeSizeLabel(size.label);
+    if (!labelKey || seenLabels.has(labelKey)) {
+      continue;
+    }
+
+    seenLabels.add(labelKey);
+    uniqueSizes.push(size);
+  }
+
+  return uniqueSizes;
+}
+
+function sortSizes(sizes) {
+  return [...(sizes || [])].sort((first, second) => {
+    const sizeOrder = ['XXXS', 'XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '4XL', '5XL', '6XL'];
+    const getSortRank = (size) => {
+      const label = normalizeSizeLabel(size?.label);
+      const value = Number(size?.value);
+
+      if (/^\d+T$/.test(label)) {
+        return { group: 0, rank: Number.parseInt(label, 10), secondary: Number.isFinite(value) ? value : Number.POSITIVE_INFINITY, label };
+      }
+
+      const labelIndex = sizeOrder.indexOf(label);
+      if (labelIndex !== -1) {
+        return { group: 1, rank: labelIndex, secondary: Number.isFinite(value) ? value : Number.POSITIVE_INFINITY, label };
+      }
+
+      if (Number.isFinite(value)) {
+        return { group: 2, rank: value, secondary: label, label };
+      }
+
+      return { group: 3, rank: Number.POSITIVE_INFINITY, secondary: label, label };
+    };
+
+    const firstRank = getSortRank(first);
+    const secondRank = getSortRank(second);
+
+    if (firstRank.group !== secondRank.group) {
+      return firstRank.group - secondRank.group;
+    }
+
+    if (firstRank.rank !== secondRank.rank) {
+      return firstRank.rank - secondRank.rank;
+    }
+
+    if (firstRank.secondary < secondRank.secondary) return -1;
+    if (firstRank.secondary > secondRank.secondary) return 1;
+
+    return firstRank.label.localeCompare(secondRank.label);
+  });
+}
+
 function renderSizeButtons(sizes) {
   if (!sizeButtons) return;
   sizeButtons.innerHTML = '';
 
-  if (!sizes || sizes.length === 0) {
+  const uniqueSizes = sortSizes(dedupeSizes(sizes));
+
+  if (uniqueSizes.length === 0) {
     sizeButtons.textContent = 'No sizes detected. Upload a clearer size guide image or rename the file to include size labels.';
     return;
   }
 
-  sizes.forEach((size) => {
-    if (size.label && typeof size.value !== 'undefined') {
-      sizeButtons.appendChild(createSizeButton(size));
-    }
+  uniqueSizes.forEach((size) => {
+    sizeButtons.appendChild(createSizeButton(size));
   });
 }
 
@@ -375,9 +449,14 @@ if (garmentTypeSelect) {
   });
 }
 
-async function analyzeFile(file, type, garmentType = null) {
+async function analyzeImages(files, type, garmentType = null) {
   const formData = new FormData();
-  formData.append('image', file);
+  const fileList = Array.isArray(files) ? files : [files];
+
+  for (const file of fileList) {
+    formData.append('image', file);
+  }
+
   formData.append('type', type);
   if (garmentType) {
     formData.append('garmentType', garmentType);
@@ -476,13 +555,14 @@ if (analyzeButton) {
   analyzeButton.addEventListener('click', async () => {
     analysisResults.innerHTML = '';
     analyzeStatus.textContent = '';
+    currentClothingSizeValue = null;
 
     const clothingFile = clothingUpload?.files[0];
-    const sizeGuideFile = sizeGuideUpload?.files[0];
+    const sizeGuideFiles = Array.from(sizeGuideUpload?.files || []);
     const garmentType = getSelectedGarmentType();
     const analysisKey = getClothingAnalysisKey(clothingFile, garmentType);
 
-    if (!clothingFile || !sizeGuideFile) {
+    if (!clothingFile || sizeGuideFiles.length === 0) {
       analyzeStatus.textContent = 'Please upload both a clothing image and a size guide image.';
       return;
     }
@@ -492,15 +572,12 @@ if (analyzeButton) {
     try {
       let clothingResult = cachedClothingResult;
       if (!clothingResult || analysisKey !== cachedClothingAnalysisKey) {
-        clothingResult = await analyzeFile(clothingFile, 'clothing', garmentType);
+        clothingResult = await analyzeImages(clothingFile, 'clothing', garmentType);
         cachedClothingAnalysisKey = analysisKey;
         cachedClothingResult = clothingResult;
       }
 
-      const sizeGuideResult = await analyzeFile(sizeGuideFile, 'sizeGuide');
-
       console.log('Clothing result:', clothingResult);
-      console.log('Size guide result:', sizeGuideResult);
 
       if (clothingResult.processedImageUrl) {
         setCutoutOverlay(clothingResult.processedImageUrl, clothingResult.cutout);
@@ -509,19 +586,29 @@ if (analyzeButton) {
         setClothingOverlay(clothingFile);
       }
 
+      const sizeGuideResult = await analyzeImages(sizeGuideFiles, 'sizeGuide');
+      const sizeGuideAnalyses = sizeGuideResult.sizeGuideEntries
+        ? sizeGuideResult.sizeGuideEntries.map((entry) => entry.analysis)
+        : (sizeGuideResult.analyses || (sizeGuideResult.analysis ? [sizeGuideResult.analysis] : []));
+      const mergedSizes = sizeGuideResult.sizes || sortSizes(dedupeSizes(sizeGuideResult.rawSizeEntries || []));
+
       analysisResults.innerHTML = `
         <div>
           <h4>Clothing Image Analysis</h4>
           <pre>${formatAnalysis('Clothing Image', clothingResult.analysis)}</pre>
         </div>
-        <div style="margin-top: 1.25rem;">
-          <h4>Size Guide Analysis</h4>
-          <pre>${formatAnalysis('Size Guide Image', sizeGuideResult.analysis)}</pre>
-        </div>
+        ${sizeGuideAnalyses
+          .map((analysis, index) => `
+            <div style="margin-top: 1.25rem;">
+              <h4>Size Guide Analysis ${sizeGuideAnalyses.length > 1 ? `(${index + 1})` : ''}</h4>
+              <pre>${formatAnalysis('Size Guide Image', analysis)}</pre>
+            </div>
+          `)
+          .join('')}
       `;
 
-      console.log('About to render sizes:', sizeGuideResult.sizes);
-      renderSizeButtons(sizeGuideResult.sizes || []);
+      console.log('About to render sizes:', mergedSizes);
+      renderSizeButtons(mergedSizes);
       analyzeStatus.textContent = 'Analysis complete.';
     } catch (error) {
       analyzeStatus.textContent = error.message;

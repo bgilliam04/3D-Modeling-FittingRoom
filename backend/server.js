@@ -35,6 +35,80 @@ function buildAnalysis(file) {
   };
 }
 
+function dedupeSizes(sizes) {
+  const uniqueSizes = [];
+  const seenLabels = new Set();
+
+  for (const size of sizes || []) {
+    if (!size || typeof size.value === 'undefined' || !size.label) {
+      continue;
+    }
+
+    const labelKey = normalizeSizeLabel(size.label);
+    if (!labelKey || seenLabels.has(labelKey)) {
+      continue;
+    }
+
+    seenLabels.add(labelKey);
+    uniqueSizes.push(size);
+  }
+
+  return uniqueSizes;
+}
+
+function normalizeSizeLabel(label) {
+  return String(label || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[.,:;()\[\]{}]/g, '')
+    .replace(/\s+/g, '')
+    .replace(/(\d+)X[-_\s]*L/g, '$1XL')
+    .replace(/X[-_\s.]*L/g, 'XL')
+    .replace(/^(\d+)XL$/, '$1XL')
+    .replace(/^(\d+)T$/, '$1T');
+}
+
+function sortSizes(sizes) {
+  return [...(sizes || [])].sort((first, second) => {
+    const sizeOrder = ['XXXS', 'XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '4XL', '5XL', '6XL'];
+    const getSortRank = (size) => {
+      const label = normalizeSizeLabel(size?.label);
+      const value = Number(size?.value);
+
+      if (/^\d+T$/.test(label)) {
+        return { group: 0, rank: Number.parseInt(label, 10), secondary: Number.isFinite(value) ? value : Number.POSITIVE_INFINITY, label };
+      }
+
+      const labelIndex = sizeOrder.indexOf(label);
+      if (labelIndex !== -1) {
+        return { group: 1, rank: labelIndex, secondary: Number.isFinite(value) ? value : Number.POSITIVE_INFINITY, label };
+      }
+
+      if (Number.isFinite(value)) {
+        return { group: 2, rank: value, secondary: label, label };
+      }
+
+      return { group: 3, rank: Number.POSITIVE_INFINITY, secondary: label, label };
+    };
+
+    const firstRank = getSortRank(first);
+    const secondRank = getSortRank(second);
+
+    if (firstRank.group !== secondRank.group) {
+      return firstRank.group - secondRank.group;
+    }
+
+    if (firstRank.rank !== secondRank.rank) {
+      return firstRank.rank - secondRank.rank;
+    }
+
+    if (firstRank.secondary < secondRank.secondary) return -1;
+    if (firstRank.secondary > secondRank.secondary) return 1;
+
+    return firstRank.label.localeCompare(secondRank.label);
+  });
+}
+
 const GARMENT_LABELS = {
   shirt: ['shirt', 't-shirt', 'tee', 'top', 'blouse'],
   tshirt: ['t-shirt', 'shirt', 'tee', 'top'],
@@ -1239,145 +1313,370 @@ async function createHeuristicGarmentCutout(buffer) {
   };
 }
 
+function normalizeOcrToken(text) {
+  return String(text || '')
+    .replace(/[|]/g, 'I')
+    .replace(/[,:;]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+
+function isSizeLabelToken(token) {
+  const compact = normalizeSizeLabel(token).replace(/\s+/g, '');
+  if (!compact) return false;
+
+  return /^(X|XXXS|XXS|XS|S|M|L|XL|XXL|XXXL|\d+XL|\d+X|\d+T|\d{1,2}(?:\/\d{1,2})?|00)$/.test(compact);
+}
+
+function parseNumericValueFromToken(token) {
+  if (!token) return null;
+
+  const normalized = String(token)
+    .replace(/\u00BC/g, '.25')
+    .replace(/\u00BD/g, '.5')
+    .replace(/\u00BE/g, '.75')
+    .replace(/\u215B/g, '.125')
+    .replace(/\u215C/g, '.375')
+    .replace(/\u215D/g, '.625')
+    .replace(/\u215E/g, '.875')
+    .replace(/,/g, '.')
+    .trim();
+
+  const rangeMatch = normalized.match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/);
+  if (rangeMatch) {
+    return Number.parseFloat(rangeMatch[1]);
+  }
+
+  const mixedFractionMatch = normalized.match(/(\d+)\s+(\d+)\/(\d+)/);
+  if (mixedFractionMatch) {
+    const whole = Number.parseFloat(mixedFractionMatch[1]);
+    const numerator = Number.parseFloat(mixedFractionMatch[2]);
+    const denominator = Number.parseFloat(mixedFractionMatch[3]);
+    if (Number.isFinite(whole) && Number.isFinite(numerator) && Number.isFinite(denominator) && denominator !== 0) {
+      return whole + numerator / denominator;
+    }
+  }
+
+  const fractionMatch = normalized.match(/^(\d+)\/(\d+)$/);
+  if (fractionMatch) {
+    const numerator = Number.parseFloat(fractionMatch[1]);
+    const denominator = Number.parseFloat(fractionMatch[2]);
+    if (Number.isFinite(numerator) && Number.isFinite(denominator) && denominator !== 0) {
+      return numerator / denominator;
+    }
+  }
+
+  const match = normalized.match(/\d+(?:\.\d+)?/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number.parseFloat(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function groupWordsIntoRows(words) {
+  const rows = [];
+  const sortedWords = [...words].sort((a, b) => a.cy - b.cy);
+
+  for (const word of sortedWords) {
+    let bestRow = null;
+    let bestDistance = Infinity;
+
+    for (const row of rows) {
+      const tolerance = Math.max(8, row.avgHeight * 0.65);
+      const distance = Math.abs(word.cy - row.cy);
+      if (distance <= tolerance && distance < bestDistance) {
+        bestDistance = distance;
+        bestRow = row;
+      }
+    }
+
+    if (!bestRow) {
+      rows.push({
+        cy: word.cy,
+        avgHeight: word.height,
+        tokens: [word],
+      });
+      continue;
+    }
+
+    bestRow.tokens.push(word);
+    bestRow.cy = (bestRow.cy * (bestRow.tokens.length - 1) + word.cy) / bestRow.tokens.length;
+    bestRow.avgHeight = (bestRow.avgHeight * (bestRow.tokens.length - 1) + word.height) / bestRow.tokens.length;
+  }
+
+  rows.sort((a, b) => a.cy - b.cy);
+  rows.forEach((row) => {
+    row.tokens.sort((a, b) => a.cx - b.cx);
+  });
+
+  return rows;
+}
+
+function repairSizeHeaderColumns(columns) {
+  const repaired = (columns || []).map((column) => ({
+    ...column,
+    label: normalizeSizeLabel(column.label),
+  }));
+
+  const hasNumericXSeries = repaired.some((column) => /^\d+X$/.test(column.label));
+  const hasLoneX = repaired.some((column) => column.label === 'X');
+  const hasPlusSizeContext = repaired.some((column) => /^(XXL|XXXL|4XL|5XL|6XL)$/.test(column.label));
+
+  if (hasNumericXSeries || hasLoneX || hasPlusSizeContext) {
+    for (const column of repaired) {
+      if (/^\d+$/.test(column.label)) {
+        column.label = `${column.label}X`;
+      }
+    }
+  }
+
+  for (let index = 0; index < repaired.length; index += 1) {
+    if (repaired[index].label !== 'X') {
+      continue;
+    }
+
+    let inferred = null;
+
+    for (let left = index - 1; left >= 0; left -= 1) {
+      const match = repaired[left].label.match(/^(\d+)X$/);
+      if (match) {
+        inferred = Number.parseInt(match[1], 10) + 1;
+        break;
+      }
+    }
+
+    if (inferred === null) {
+      for (let right = index + 1; right < repaired.length; right += 1) {
+        const match = repaired[right].label.match(/^(\d+)X$/);
+        if (match) {
+          inferred = Number.parseInt(match[1], 10) - 1;
+          break;
+        }
+      }
+    }
+
+    if (Number.isInteger(inferred) && inferred > 0) {
+      repaired[index].label = `${inferred}X`;
+    }
+  }
+
+  return repaired;
+}
+
+function extractSizesFromTableWords(ocrData) {
+  const words = (ocrData?.words || [])
+    .map((word) => {
+      const text = normalizeOcrToken(word.text);
+      if (!text) return null;
+
+      const x0 = word?.bbox?.x0 ?? 0;
+      const x1 = word?.bbox?.x1 ?? 0;
+      const y0 = word?.bbox?.y0 ?? 0;
+      const y1 = word?.bbox?.y1 ?? 0;
+
+      return {
+        text,
+        cx: (x0 + x1) / 2,
+        cy: (y0 + y1) / 2,
+        height: Math.max(1, y1 - y0),
+      };
+    })
+    .filter(Boolean);
+
+  if (words.length === 0) {
+    return [];
+  }
+
+  const rows = groupWordsIntoRows(words);
+  if (rows.length === 0) {
+    return [];
+  }
+
+  let headerRowIndex = -1;
+  let headerLabels = [];
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const sizeTokens = row.tokens.filter((token) => isSizeLabelToken(token.text));
+    const hasSizeWord = row.tokens.some((token) => token.text === 'SIZE');
+
+    if (sizeTokens.length >= 3 || (hasSizeWord && sizeTokens.length >= 1)) {
+      headerRowIndex = index;
+      headerLabels = sizeTokens;
+      break;
+    }
+  }
+
+  if (headerRowIndex === -1 || headerLabels.length === 0) {
+    return [];
+  }
+
+  // Keep one consistent size depiction row (e.g., XXS/XS/... or 00/0/2/...).
+  // Some guides include both depictions on stacked rows; we intentionally use only
+  // the first detected row to avoid mixing label styles.
+  const headerColumns = repairSizeHeaderColumns(headerLabels.map((token) => ({
+    label: normalizeSizeLabel(token.text),
+    x: token.cx,
+  })));
+
+  let depictionRowCount = 1;
+  for (let index = headerRowIndex + 1; index < Math.min(rows.length, headerRowIndex + 3); index += 1) {
+    const row = rows[index];
+    const sizeTokens = row.tokens.filter((token) => isSizeLabelToken(token.text));
+    if (sizeTokens.length >= Math.max(2, Math.floor(headerColumns.length * 0.6))) {
+      depictionRowCount += 1;
+    } else {
+      break;
+    }
+  }
+
+  let measurementRow = null;
+  const measurementKeywords = ['CHEST', 'BUST', 'WAIST', 'BODY', 'WIDTH', 'LENGTH', 'HIP', 'INSEAM'];
+  const measurementSearchStart = headerRowIndex + depictionRowCount;
+
+  for (let index = measurementSearchStart; index < rows.length; index += 1) {
+    const row = rows[index];
+    const rowText = row.tokens.map((token) => token.text).join(' ');
+    const hasKeyword = measurementKeywords.some((keyword) => rowText.includes(keyword));
+    const numericTokenCount = row.tokens.filter((token) => parseNumericValueFromToken(token.text) !== null).length;
+
+    if (hasKeyword && numericTokenCount >= 2) {
+      measurementRow = row;
+      break;
+    }
+  }
+
+  if (!measurementRow) {
+    for (let index = measurementSearchStart; index < rows.length; index += 1) {
+      const row = rows[index];
+      const numericTokenCount = row.tokens.filter((token) => parseNumericValueFromToken(token.text) !== null).length;
+      if (numericTokenCount >= 2) {
+        measurementRow = row;
+        break;
+      }
+    }
+  }
+
+  if (!measurementRow) {
+    return [];
+  }
+
+  const numericCells = measurementRow.tokens
+    .map((token) => ({ x: token.cx, value: parseNumericValueFromToken(token.text) }))
+    .filter((token) => Number.isFinite(token.value));
+
+  if (numericCells.length === 0) {
+    return [];
+  }
+
+  const mapLabelsToValues = (labelTokens) => {
+    const mapped = [];
+
+    for (const labelToken of labelTokens) {
+      const label = normalizeSizeLabel(labelToken.text || labelToken.label);
+      const x = typeof labelToken.x === 'number' ? labelToken.x : labelToken.cx;
+      if (!label || typeof x !== 'number') {
+        continue;
+      }
+
+      let nearest = null;
+      let nearestDistance = Infinity;
+      for (const numericCell of numericCells) {
+        const distance = Math.abs(numericCell.x - x);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearest = numericCell;
+        }
+      }
+
+      if (nearest) {
+        mapped.push({ label, value: nearest.value });
+      }
+    }
+
+    return mapped;
+  };
+
+  return mapLabelsToValues(headerColumns);
+}
+
 function parseSizeGuideText(text) {
   const sizes = [];
-  const processedLabels = new Set();
-  
-  // Remove common OCR artifacts and normalize
-  let cleanText = text
-    .replace(/[•·•◦\[\]]/g, '') // Remove bullet points and brackets
-    .replace(/[%]/g, '') // Remove percentage signs
-    .replace(/\s+/g, ' ') // Normalize whitespace
+  const seenLabels = new Set();
+
+  const cleanText = String(text || '')
+    .replace(/[•·◦\[\]]/g, ' ')
+    .replace(/[%]/g, ' ')
+    .replace(/\r/g, '\n')
+    .replace(/\t/g, ' ')
     .toUpperCase();
-  
+
   console.log('Cleaned text:', cleanText);
-  
-  // Strategy: Extract size headers and values systematically
-  
-  // Step 1: Find all size headers (2T, 3T, etc.) and their positions
-  const sizeHeaderPattern = /([0-9]+T)/gi;
-  let match;
-  const sizeHeaders = [];
-  
-  while ((match = sizeHeaderPattern.exec(cleanText)) !== null) {
-    sizeHeaders.push({
-      label: match[1],
-      index: match.index
-    });
-  }
-  
-  console.log('Found size headers:', sizeHeaders);
-  
-  // Step 2: Try to fix OCR errors - look for suspicious patterns near size headers
-  // For example, if we have 2T, 3T, AR, 5T, 6T - AR is likely 4T
-  if (sizeHeaders.length > 1) {
-    // Check for gaps in the sequence (e.g., 2T, 3T, 5T -> missing 4T)
-    for (let i = 0; i < sizeHeaders.length - 1; i++) {
-      const current = parseInt(sizeHeaders[i].label);
-      const next = parseInt(sizeHeaders[i + 1].label);
-      
-      if (next - current > 1) {
-        // Gap found - look for OCR artifacts between them
-        const gapStart = sizeHeaders[i].index + sizeHeaders[i].label.length;
-        const gapEnd = sizeHeaders[i + 1].index;
-        const gapText = cleanText.substring(gapStart, gapEnd);
-        
-        console.log(`Gap found between ${current}T and ${next}T: "${gapText}"`);
-        
-        // Try to construct missing headers
-        for (let j = current + 1; j < next; j++) {
-          const missingLabel = `${j}T`;
-          if (!sizeHeaders.some(h => h.label === missingLabel)) {
-            sizeHeaders.splice(i + 1, 0, {
-              label: missingLabel,
-              index: -1, // Mark as inserted
-              inferred: true
-            });
-          }
+
+  const labelPattern = /\b(XXXL|XXL|2XL|XL|XS|S|M|L|3XL|4XL|5XL|\d+T)\b/gi;
+  const numberPattern = /\b(\d{1,3}(?:\.\d+)?)\b/g;
+  const lines = cleanText
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const normalizedLine = line
+      .replace(/(\d+)\s*X\s*L\b/g, '$1XL')
+      .replace(/X\s*X\s*L\b/g, 'XXL')
+      .replace(/X\s*X\s*X\s*L\b/g, 'XXXL')
+      .replace(/X\s*S\b/g, 'XS')
+      .replace(/(\d+)\s*T\b/g, '$1T');
+
+    labelPattern.lastIndex = 0;
+    let labelMatch;
+
+    while ((labelMatch = labelPattern.exec(normalizedLine)) !== null) {
+      const label = normalizeSizeLabel(labelMatch[1]);
+      if (seenLabels.has(label)) {
+        continue;
+      }
+
+      const labelStart = labelMatch.index;
+      const labelEnd = labelStart + labelMatch[0].length;
+      let matchedValue = null;
+      let bestDistance = Infinity;
+
+      numberPattern.lastIndex = 0;
+      let numberMatch;
+
+      while ((numberMatch = numberPattern.exec(line)) !== null) {
+        const value = parseFloat(numberMatch[1]);
+        if (!Number.isFinite(value) || value <= 0 || value > 1000) {
+          continue;
+        }
+
+        const numberStart = numberMatch.index;
+        const numberEnd = numberStart + numberMatch[0].length;
+        if (numberStart >= labelStart && numberEnd <= labelEnd) {
+          continue;
+        }
+
+        const distance = numberStart >= labelEnd ? numberStart - labelEnd : labelStart - numberEnd;
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          matchedValue = value;
         }
       }
-    }
-    sizeHeaders.sort((a, b) => parseInt(a.label) - parseInt(b.label));
-  }
-  
-  console.log('Fixed size headers:', sizeHeaders);
-  
-  // Step 3: Extract all numbers from the text
-  const numberPattern = /(\d+(?:\.\d+)?)/g;
-  const numbers = [];
-  while ((match = numberPattern.exec(cleanText)) !== null) {
-    numbers.push({
-      value: parseFloat(match[1]),
-      index: match.index
-    });
-  }
-  
-  console.log('Found numbers:', numbers);
-  
-  // Step 4: Match size headers with appropriate values
-  // Look for the first sequence of body measurements
-  if (sizeHeaders.length > 0) {
-    // Find consecutive numbers and pair them with size headers
-    let bodyMeasurements = [];
-    
-    // Extract all numbers in order 
-    if (numbers.length > 0) {
-      // Find the first contiguous sequence of valid measurements
-      // that matches or exceeds our size header count
-      let currentSequence = [];
-      
-      for (const num of numbers) {
-        if (num.value > 5 && num.value < 100) {
-          currentSequence.push(num);
-        } else if (currentSequence.length > 0) {
-          // Sequence broken, check if we found enough
-          if (currentSequence.length >= Math.min(sizeHeaders.length, 4)) {
-            bodyMeasurements = currentSequence.slice(0, sizeHeaders.length);
-            break;
-          }
-          currentSequence = [];
-        }
-      }
-      
-      // Check final sequence
-      if (bodyMeasurements.length === 0 && currentSequence.length >= Math.min(sizeHeaders.length, 4)) {
-        bodyMeasurements = currentSequence.slice(0, sizeHeaders.length);
-      }
-    }
-    
-    console.log('Body measurements:', bodyMeasurements);
-    
-    if (bodyMeasurements.length > 0 && bodyMeasurements.length >= Math.min(sizeHeaders.length, 4)) {
-      // Match headers with measurements
-      // Use only as many headers as we have measurements
-      const matchCount = Math.min(sizeHeaders.length, bodyMeasurements.length);
-      
-      for (let i = 0; i < matchCount; i++) {
-        const label = sizeHeaders[i].label;
-        const value = bodyMeasurements[i].value;
-        
-        if (!processedLabels.has(label)) {
-          sizes.push({ label, value });
-          processedLabels.add(label);
-          console.log(`Matched: ${label} = ${value}`);
-        }
+
+      if (matchedValue !== null) {
+        sizes.push({ label, value: matchedValue });
+        seenLabels.add(label);
+        console.log(`Matched: ${label} = ${matchedValue}`);
       }
     }
   }
 
-  if (sizes.length > 0) {
-    console.log('Returning parsed sizes:', sizes);
-    return sizes;
-  }
-
-  console.log('No sizes found, returning defaults');
-  // Fallback to default sizes
-  return [
-    { label: 'S', value: 34 },
-    { label: 'M', value: 36 },
-    { label: 'L', value: 38 },
-    { label: 'XL', value: 40 },
-  ];
+  console.log('Parsed sizes:', sizes);
+  return sizes;
 }
 
 async function parseSizeGuideImage(file) {
@@ -1386,7 +1685,7 @@ async function parseSizeGuideImage(file) {
   });
   const ocrText = result.data?.text || '';
   console.log('Raw OCR text:', ocrText);
-  const sizes = parseSizeGuideText(ocrText);
+  const sizes = extractSizesFromTableWords(result.data);
   console.log('Parsed sizes:', sizes);
   return sizes;
 }
@@ -1400,30 +1699,56 @@ app.post('/upload-scan', upload.single('model'), (req, res) => {
   res.json({ success: true, preview: { fileName: analysis.fileName, mimeType: analysis.mimeType }, analysis });
 });
 
-app.post('/analyze-image', upload.single('image'), async (req, res) => {
+app.post('/analyze-image', upload.any(), async (req, res) => {
   console.log('=== /analyze-image endpoint hit ===');
   console.log('req.body:', req.body);
-  console.log('req.file:', req.file ? `${req.file.originalname} (${req.file.size} bytes)` : 'No file');
+  console.log('req.files:', Array.isArray(req.files) ? req.files.map((file) => `${file.originalname} (${file.size} bytes)`) : 'No files');
   
-  if (!req.file) {
+  const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+
+  if (uploadedFiles.length === 0) {
     return res.status(400).json({ error: 'No image file uploaded.' });
   }
 
   try {
-    const analysis = buildAnalysis(req.file);
+    const primaryFile = uploadedFiles[0];
+    const analysis = buildAnalysis(primaryFile);
     console.log('Image type:', req.body.type);
     
     let sizes = [];
     let processedImageUrl = null;
     let cutout = null;
+    let analyses = [analysis];
+    let sizeGuideEntries = [];
+    let rawSizeEntries = [];
     
     if (req.body.type === 'sizeGuide') {
       console.log('Processing as size guide...');
-      sizes = await parseSizeGuideImage(req.file);
+      sizeGuideEntries = [];
+
+      for (const file of uploadedFiles) {
+        const fileAnalysis = buildAnalysis(file);
+        const fileSizes = await parseSizeGuideImage(file);
+
+        sizeGuideEntries.push({
+          analysis: fileAnalysis,
+          sizes: fileSizes,
+        });
+
+        rawSizeEntries.push(
+          ...fileSizes.map((size) => ({
+            ...size,
+            sourceFile: fileAnalysis.fileName,
+          })),
+        );
+      }
+
+      analyses = sizeGuideEntries.map((entry) => entry.analysis);
+      sizes = sortSizes(dedupeSizes(rawSizeEntries));
       console.log('Size guide processing complete. Sizes:', sizes);
     } else if (req.body.type === 'clothing') {
       console.log('Processing as clothing cutout...');
-      const cutoutResult = await createGarmentCutout(req.file.buffer, req.body.garmentType, req.file.mimetype);
+      const cutoutResult = await createGarmentCutout(primaryFile.buffer, req.body.garmentType, primaryFile.mimetype);
       processedImageUrl = cutoutResult.pngDataUrl;
       cutout = cutoutResult.cutout;
       console.log('Clothing cutout complete:', cutout);
@@ -1432,7 +1757,16 @@ app.post('/analyze-image', upload.single('image'), async (req, res) => {
     }
     
     console.log('Sending response:', { success: true, analysis, sizes, hasCutout: Boolean(processedImageUrl) });
-    res.json({ success: true, analysis, sizes, processedImageUrl, cutout });
+    res.json({
+      success: true,
+      analysis,
+      analyses: req.body.type === 'sizeGuide' ? analyses : undefined,
+      sizeGuideEntries: req.body.type === 'sizeGuide' ? sizeGuideEntries : undefined,
+      rawSizeEntries: req.body.type === 'sizeGuide' ? rawSizeEntries : undefined,
+      sizes,
+      processedImageUrl,
+      cutout,
+    });
   } catch (error) {
     console.error('Image analysis failed:', error);
     res.status(500).json({ error: 'Failed to analyze image.', details: error.message });
