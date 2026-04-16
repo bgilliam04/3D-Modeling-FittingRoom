@@ -212,6 +212,17 @@ function selectBestGarmentDetection(detections, garmentType, imageWidth, imageHe
 
   let bestDetection = null;
   let bestScore = -Infinity;
+  const debugMode = garmentType === 'skirt';
+
+  if (debugMode) {
+    console.log(`\n[DEBUG SKIRT] Analyzing ${detections.length} detections. Profile constraints:`, {
+      areaRatio: `${profile.minAreaRatio}`,
+      heightRatio: `${profile.minHeightRatio}`,
+      yRange: [minYRange, maxYRange],
+      aspectRange: [minAspect, maxAspect],
+      maxSkinRatio: profile.maxSkinRatio,
+    });
+  }
 
   for (const detection of detections) {
     if (!detection?.box) continue;
@@ -234,14 +245,35 @@ function selectBestGarmentDetection(detections, garmentType, imageWidth, imageHe
     const yNormalized = centerY / imageHeight;
     const skinRatio = estimateSkinRatioInBox(rawData, imageWidth, imageHeight, channels, detection.box);
 
-    const failsShapeRules =
-      areaRatio < (profile.minAreaRatio ?? 0.05) ||
-      heightRatio < (profile.minHeightRatio ?? 0.16) ||
-      yNormalized < minYRange ||
-      yNormalized > maxYRange ||
-      aspectRatio < minAspect ||
-      aspectRatio > maxAspect ||
-      skinRatio > (profile.maxSkinRatio ?? 0.65);
+    const failsArea = areaRatio < (profile.minAreaRatio ?? 0.05);
+    const failsHeight = heightRatio < (profile.minHeightRatio ?? 0.16);
+    const failsYMin = yNormalized < minYRange;
+    const failsYMax = yNormalized > maxYRange;
+    const failsAspectMin = aspectRatio < minAspect;
+    const failsAspectMax = aspectRatio > maxAspect;
+    const failsSkin = skinRatio > (profile.maxSkinRatio ?? 0.65);
+
+    const failsShapeRules = failsArea || failsHeight || failsYMin || failsYMax || failsAspectMin || failsAspectMax || failsSkin;
+
+    if (debugMode) {
+      const reasons = [];
+      if (failsArea) reasons.push(`area ${areaRatio.toFixed(3)} < ${profile.minAreaRatio}`);
+      if (failsHeight) reasons.push(`height ${heightRatio.toFixed(3)} < ${profile.minHeightRatio}`);
+      if (failsYMin) reasons.push(`yNorm ${yNormalized.toFixed(3)} < ${minYRange}`);
+      if (failsYMax) reasons.push(`yNorm ${yNormalized.toFixed(3)} > ${maxYRange}`);
+      if (failsAspectMin) reasons.push(`aspect ${aspectRatio.toFixed(3)} < ${minAspect}`);
+      if (failsAspectMax) reasons.push(`aspect ${aspectRatio.toFixed(3)} > ${maxAspect}`);
+      if (failsSkin) reasons.push(`skin ${skinRatio.toFixed(3)} > ${profile.maxSkinRatio}`);
+      console.log(`  Detection: box [${left},${top}:${right},${bottom}] score=${detection.score.toFixed(3)}`, {
+        areaRatio: areaRatio.toFixed(4),
+        heightRatio: heightRatio.toFixed(4),
+        yNormalized: yNormalized.toFixed(4),
+        aspectRatio: aspectRatio.toFixed(4),
+        skinRatio: skinRatio.toFixed(4),
+        passed: !failsShapeRules,
+        failedRules: failsShapeRules ? reasons : 'NONE',
+      });
+    }
 
     if (failsShapeRules) {
       continue;
@@ -263,6 +295,14 @@ function selectBestGarmentDetection(detections, garmentType, imageWidth, imageHe
         ...detection,
         box: { xmin: left, ymin: top, xmax: right, ymax: bottom },
       };
+    }
+  }
+
+  if (debugMode) {
+    if (bestDetection) {
+      console.log(`[DEBUG SKIRT] BEST DETECTION selected: box=${JSON.stringify(bestDetection.box)}, score=${bestScore.toFixed(3)}`);
+    } else {
+      console.log(`[DEBUG SKIRT] NO VALID DETECTIONS (all rejected by shape rules)`);
     }
   }
 
