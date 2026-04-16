@@ -352,7 +352,7 @@ function renderSizeButtons(sizes) {
   const uniqueSizes = sortSizes(dedupeSizes(sizes));
 
   if (uniqueSizes.length === 0) {
-    sizeButtons.textContent = 'No sizes detected. Upload a clearer size guide image or rename the file to include size labels.';
+    sizeButtons.textContent = 'No sizes detected. Try uploading a clearer, high-quality screenshot of the size guide. Ensure the text is crisp and the table is well-lit.';
     return;
   }
 

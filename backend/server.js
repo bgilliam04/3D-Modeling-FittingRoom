@@ -1685,8 +1685,24 @@ async function parseSizeGuideImage(file) {
   });
   const ocrText = result.data?.text || '';
   console.log('Raw OCR text:', ocrText);
-  const sizes = extractSizesFromTableWords(result.data);
-  console.log('Parsed sizes:', sizes);
+  
+  // Try table-based parsing first (preferred for proper size guides)
+  let sizes = extractSizesFromTableWords(result.data);
+  console.log('Table parser result:', sizes);
+  
+  // If table parser found nothing, fall back to line-based text parser
+  if (sizes.length === 0 && ocrText.trim()) {
+    console.log('Table parser found no sizes, falling back to line-based parser...');
+    sizes = parseSizeGuideText(ocrText);
+    console.log('Line parser result:', sizes);
+  }
+  
+  // If both parsers failed, log a warning
+  if (sizes.length === 0) {
+    console.log('Warning: No sizes detected in image. Image quality may be poor or format may not be recognized.');
+  }
+  
+  console.log('Final parsed sizes:', sizes);
   return sizes;
 }
 
