@@ -1,17 +1,18 @@
-# Clothing Outline PNGs
+# Clothing Outline Images
 
-Put outline PNG files in subfolders by garment type:
+Put outline image files (PNG, JPG, JPEG) in subfolders by garment type:
 
-- `clothing-outline-pngs/shirt/*.png`
-- `clothing-outline-pngs/dress/*.png`
-- `clothing-outline-pngs/pants/*.png`
-- `clothing-outline-pngs/shorts/*.png`
-- `clothing-outline-pngs/skirt/*.png`
-- `clothing-outline-pngs/jacket/*.png`
+- `clothing-outline-pngs/shirt/*.{png,jpg,jpeg}`
+- `clothing-outline-pngs/dress/*.{png,jpg,jpeg}`
+- `clothing-outline-pngs/pants/*.{png,jpg,jpeg}`
+- `clothing-outline-pngs/shorts/*.{png,jpg,jpeg}`
+- `clothing-outline-pngs/skirt/*.{png,jpg,jpeg}`
+- `clothing-outline-pngs/jacket/*.{png,jpg,jpeg}`
 
-Expected input image:
-- Transparent background with garment silhouette as non-transparent pixels.
-- If no alpha channel exists, near-white pixels are treated as background.
+Expected input images:
+- PNG/JPG/JPEG formats supported
+- Transparent background with garment silhouette as non-transparent pixels (for PNG with alpha)
+- If no alpha channel, near-white pixels are treated as background
 
 Then run:
 

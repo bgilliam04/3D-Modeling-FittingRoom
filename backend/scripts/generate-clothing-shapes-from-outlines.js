@@ -150,18 +150,18 @@ function extractTemplateFromOutline(filePath) {
     });
 }
 
-function listPngFilesRecursive(dirPath) {
+function listImageFilesRecursive(dirPath) {
   const files = [];
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
 
   for (const entry of entries) {
     const fullPath = path.join(dirPath, entry.name);
     if (entry.isDirectory()) {
-      files.push(...listPngFilesRecursive(fullPath));
+      files.push(...listImageFilesRecursive(fullPath));
       continue;
     }
 
-    if (entry.isFile() && entry.name.toLowerCase().endsWith('.png')) {
+    if (entry.isFile() && /\.(png|jpg|jpeg)$/i.test(entry.name)) {
       files.push(fullPath);
     }
   }
@@ -224,13 +224,13 @@ async function generateFromOutlines(outlinesDir, shapesPath) {
 
   for (const garment of garmentDirs) {
     const garmentPath = path.join(outlinesDir, garment);
-    const pngFiles = listPngFilesRecursive(garmentPath);
-    if (!pngFiles.length) {
+    const imageFiles = listImageFilesRecursive(garmentPath);
+    if (!imageFiles.length) {
       continue;
     }
 
     const extracted = [];
-    for (const filePath of pngFiles) {
+    for (const filePath of imageFiles) {
       const template = await extractTemplateFromOutline(filePath);
       if (template) {
         extracted.push(template);
@@ -257,7 +257,7 @@ async function generateFromOutlines(outlinesDir, shapesPath) {
       },
     };
 
-    summary.push({ garment: garmentKey, files: pngFiles.length, templates: extracted.length });
+    summary.push({ garment: garmentKey, files: imageFiles.length, templates: extracted.length });
   }
 
   shapeData._meta = {
