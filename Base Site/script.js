@@ -259,7 +259,7 @@ function createSizeButton(size) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'size-button';
-  button.textContent = `${size.label} (${size.value})`;
+  button.textContent = size.label;
   button.dataset.sizeValue = size.value;
   button.addEventListener('click', () => {
     document.querySelectorAll('.size-button').forEach((btn) => btn.classList.remove('active'));
