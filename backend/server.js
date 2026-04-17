@@ -68,27 +68,102 @@ function normalizeSizeLabel(label) {
     .replace(/^(\d+)T$/, '$1T');
 }
 
+function parseNumericSizeLabel(label) {
+  const normalized = normalizeSizeLabel(label);
+  if (!normalized) {
+    return null;
+  }
+
+  if (/^\d+(?:\.\d+)?$/.test(normalized)) {
+    const parsed = Number.parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function greatestCommonDivisor(first, second) {
+  let a = Math.abs(Math.round(first));
+  let b = Math.abs(Math.round(second));
+
+  while (b !== 0) {
+    const remainder = a % b;
+    a = b;
+    b = remainder;
+  }
+
+  return a;
+}
+
+function inferNumericSizeSequence(columns) {
+  const numericColumns = (columns || [])
+    .map((column, index) => ({
+      index,
+      value: parseNumericSizeLabel(column?.label),
+    }))
+    .filter((column) => Number.isFinite(column.value));
+
+  if (numericColumns.length < 3) {
+    return null;
+  }
+
+  const uniqueValues = [...new Set(numericColumns.map((column) => column.value))].sort((a, b) => a - b);
+  if (uniqueValues.length < 3) {
+    return null;
+  }
+
+  let step = 0;
+  for (let index = 1; index < uniqueValues.length; index += 1) {
+    const difference = uniqueValues[index] - uniqueValues[index - 1];
+    if (difference <= 0) {
+      continue;
+    }
+    step = step === 0 ? difference : greatestCommonDivisor(step, difference);
+  }
+
+  if (!Number.isFinite(step) || step < 1) {
+    return null;
+  }
+
+  const firstNumericColumn = numericColumns.slice().sort((a, b) => a.index - b.index)[0];
+  const start = firstNumericColumn.value - firstNumericColumn.index * step;
+
+  if (!Number.isFinite(start)) {
+    return null;
+  }
+
+  return { start, step };
+}
+
 function sortSizes(sizes) {
   return [...(sizes || [])].sort((first, second) => {
     const sizeOrder = ['XXXS', 'XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '4XL', '5XL', '6XL'];
     const getSortRank = (size) => {
       const label = normalizeSizeLabel(size?.label);
-      const value = Number(size?.value);
 
       if (/^\d+T$/.test(label)) {
+        const value = Number(size?.value);
         return { group: 0, rank: Number.parseInt(label, 10), secondary: Number.isFinite(value) ? value : Number.POSITIVE_INFINITY, label };
       }
 
       const labelIndex = sizeOrder.indexOf(label);
       if (labelIndex !== -1) {
+        const value = Number(size?.value);
         return { group: 1, rank: labelIndex, secondary: Number.isFinite(value) ? value : Number.POSITIVE_INFINITY, label };
       }
 
-      if (Number.isFinite(value)) {
-        return { group: 2, rank: value, secondary: label, label };
+      const numericLabel = parseNumericSizeLabel(label);
+      if (numericLabel !== null) {
+        const value = Number(size?.value);
+        return { group: 2, rank: numericLabel, secondary: Number.isFinite(value) ? value : Number.POSITIVE_INFINITY, label };
       }
 
-      return { group: 3, rank: Number.POSITIVE_INFINITY, secondary: label, label };
+      const value = Number(size?.value);
+      if (Number.isFinite(value)) {
+        return { group: 3, rank: value, secondary: label, label };
+      }
+
+      return { group: 4, rank: Number.POSITIVE_INFINITY, secondary: label, label };
     };
 
     const firstRank = getSortRank(first);
@@ -349,20 +424,22 @@ function selectBestGarmentDetection(detections, garmentType, imageWidth, imageHe
       });
     }
 
+    const baseScore = Math.max(0.01, detection.score);
+    const areaDistance = Math.abs(areaRatio - targetAreaRatio) / Math.max(0.02, targetAreaRatio);
+    const yDistance = Math.abs(yNormalized - targetY);
+
     if (failsShapeRules) {
       continue;
     }
 
-    const baseScore = Math.max(0.01, detection.score);
-    const areaDistance = Math.abs(areaRatio - targetAreaRatio) / Math.max(0.02, targetAreaRatio);
     const areaWeight = Math.max(0.25, 1.4 - Math.min(1.1, areaDistance));
     const centerWeight = Math.max(0.2, 1 - centerDistance * 0.8);
     const skinWeight = Math.max(0.05, 1 - skinRatio * 0.9);
-    const yDistance = Math.abs(yNormalized - targetY);
     const yWeight = Math.max(0.2, 1.35 - Math.min(1.1, yDistance * 2.2));
     const shapeWeight = Math.max(0.2, 1.2 - Math.min(1, Math.abs(aspectRatio - ((minAspect + maxAspect) / 2))));
 
     const combinedScore = baseScore * areaWeight * centerWeight * skinWeight * yWeight * shapeWeight;
+
     if (combinedScore > bestScore) {
       bestScore = combinedScore;
       bestDetection = {
@@ -454,6 +531,80 @@ function findAlphaBounds(rawImage) {
     top: minY,
     width: maxX - minX + 1,
     height: maxY - minY + 1,
+  };
+}
+
+function getAlphaOpaqueRatio(rawImage) {
+  if (!rawImage || rawImage.channels < 4) {
+    return 1;
+  }
+
+  const { data, width, height, channels } = rawImage;
+  const totalPixels = width * height;
+  if (totalPixels <= 0) {
+    return 1;
+  }
+
+  let opaquePixels = 0;
+  for (let index = 0; index < totalPixels; index += 1) {
+    const alpha = data[index * channels + 3];
+    if (alpha > 0) {
+      opaquePixels += 1;
+    }
+  }
+
+  return opaquePixels / totalPixels;
+}
+
+function getAlphaBorderOpaqueRatio(rawImage) {
+  if (!rawImage || rawImage.channels < 4) {
+    return 1;
+  }
+
+  const { data, width, height, channels } = rawImage;
+  if (width <= 1 || height <= 1) {
+    return 1;
+  }
+
+  let borderOpaque = 0;
+  let borderTotal = 0;
+
+  const sample = (x, y) => {
+    const offset = (y * width + x) * channels + 3;
+    borderTotal += 1;
+    if (data[offset] > 0) {
+      borderOpaque += 1;
+    }
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    sample(x, 0);
+    sample(x, height - 1);
+  }
+  for (let y = 1; y < height - 1; y += 1) {
+    sample(0, y);
+    sample(width - 1, y);
+  }
+
+  if (borderTotal === 0) {
+    return 1;
+  }
+
+  return borderOpaque / borderTotal;
+}
+
+function withCutoutOffset(cutoutResult, offsetX, offsetY) {
+  if (!cutoutResult || !cutoutResult.cutout) {
+    return cutoutResult;
+  }
+
+  return {
+    ...cutoutResult,
+    cutout: {
+      ...cutoutResult.cutout,
+      offsetX: (cutoutResult.cutout.offsetX || 0) + offsetX,
+      offsetY: (cutoutResult.cutout.offsetY || 0) + offsetY,
+    },
   };
 }
 
@@ -785,11 +936,21 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
     const backgroundRemover = await getBackgroundRemover();
     const cutoutImage = await backgroundRemover(croppedImage);
     const refinedResult = refineCutoutMask(cutoutImage, normalizedGarmentType);
+    const opaqueRatio = getAlphaOpaqueRatio(refinedResult.image);
+    const borderOpaqueRatio = getAlphaBorderOpaqueRatio(refinedResult.image);
+
+    if (opaqueRatio > 0.88 || borderOpaqueRatio > 0.72) {
+      // Background remover occasionally returns near-full opacity; fall back to color-key extraction.
+      const fallbackCutout = await createColorKeyCutout(croppedBuffer);
+      return withCutoutOffset(fallbackCutout, cropLeft, cropTop);
+    }
+
     const alphaBounds = refinedResult.bounds;
 
     if (!alphaBounds) {
       // Never return a raw crop when no garment mask exists.
-      return createHeuristicGarmentCutout(croppedBuffer);
+      const fallbackCutout = await createHeuristicGarmentCutout(croppedBuffer);
+      return withCutoutOffset(fallbackCutout, cropLeft, cropTop);
     }
 
     const cutoutBuffer = await sharp(Buffer.from(refinedResult.image.data), {
@@ -816,6 +977,216 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
     console.warn('Model-based garment cutout failed, falling back to heuristic cutout:', error.message);
     return createHeuristicGarmentCutout(buffer);
   }
+}
+
+async function createColorKeyCutout(buffer) {
+  const { data, info } = await sharp(buffer)
+    .rotate()
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const { width, height, channels } = info;
+  if (width < 2 || height < 2 || channels < 4) {
+    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
+    return {
+      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
+      cutout: {
+        width,
+        height,
+        offsetX: 0,
+        offsetY: 0,
+      },
+    };
+  }
+
+  const outputRaw = Buffer.from(data);
+  const borderBand = Math.max(4, Math.round(Math.min(width, height) * 0.06));
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let samples = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const isBorder =
+        x < borderBand ||
+        y < borderBand ||
+        x >= width - borderBand ||
+        y >= height - borderBand;
+      if (!isBorder) continue;
+
+      const offset = (y * width + x) * channels;
+      sumR += outputRaw[offset];
+      sumG += outputRaw[offset + 1];
+      sumB += outputRaw[offset + 2];
+      samples += 1;
+    }
+  }
+
+  const background = samples > 0
+    ? [sumR / samples, sumG / samples, sumB / samples]
+    : [255, 255, 255];
+
+  const distanceThreshold = 38;
+  const distanceThresholdSquared = distanceThreshold * distanceThreshold;
+  const nearWhiteThreshold = 244;
+  const candidateMask = new Uint8Array(width * height);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * channels;
+      const red = outputRaw[offset];
+      const green = outputRaw[offset + 1];
+      const blue = outputRaw[offset + 2];
+
+      const distanceSquared =
+        (red - background[0]) * (red - background[0]) +
+        (green - background[1]) * (green - background[1]) +
+        (blue - background[2]) * (blue - background[2]);
+
+      const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      if (distanceSquared > distanceThresholdSquared || luminance < nearWhiteThreshold) {
+        candidateMask[index] = 1;
+      }
+    }
+  }
+
+  const visited = new Uint8Array(width * height);
+  const queue = [];
+  let queueHead = 0;
+  let bestPixels = [];
+  let bestScore = -Infinity;
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const maxDistance = Math.max(1, Math.hypot(centerX, centerY));
+
+  for (let start = 0; start < candidateMask.length; start += 1) {
+    if (!candidateMask[start] || visited[start]) continue;
+
+    queue.length = 0;
+    queueHead = 0;
+    queue.push(start);
+    visited[start] = 1;
+
+    let area = 0;
+    let sumXComponent = 0;
+    let sumYComponent = 0;
+    const pixels = [];
+
+    while (queueHead < queue.length) {
+      const current = queue[queueHead++];
+      const x = current % width;
+      const y = Math.floor(current / width);
+
+      area += 1;
+      sumXComponent += x;
+      sumYComponent += y;
+      pixels.push(current);
+
+      const neighbors = [
+        [x + 1, y],
+        [x - 1, y],
+        [x, y + 1],
+        [x, y - 1],
+      ];
+
+      for (const [nx, ny] of neighbors) {
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        const nIndex = ny * width + nx;
+        if (!candidateMask[nIndex] || visited[nIndex]) continue;
+        visited[nIndex] = 1;
+        queue.push(nIndex);
+      }
+    }
+
+    const centroidX = sumXComponent / area;
+    const centroidY = sumYComponent / area;
+    const centerDistance = Math.hypot(centroidX - centerX, centroidY - centerY) / maxDistance;
+    const score = area * (1 - Math.min(0.92, centerDistance));
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestPixels = pixels;
+    }
+  }
+
+  if (!bestPixels.length) {
+    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
+    return {
+      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
+      cutout: {
+        width,
+        height,
+        offsetX: 0,
+        offsetY: 0,
+      },
+    };
+  }
+
+  const keepMask = new Uint8Array(width * height);
+  for (const pixelIndex of bestPixels) {
+    keepMask[pixelIndex] = 1;
+  }
+
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * channels;
+
+      if (!keepMask[index]) {
+        outputRaw[offset + 3] = 0;
+        continue;
+      }
+
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+
+  if (maxX < minX || maxY < minY) {
+    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
+    return {
+      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
+      cutout: {
+        width,
+        height,
+        offsetX: 0,
+        offsetY: 0,
+      },
+    };
+  }
+
+  const cropWidth = maxX - minX + 1;
+  const cropHeight = maxY - minY + 1;
+  const croppedPngBuffer = await sharp(outputRaw, {
+    raw: {
+      width,
+      height,
+      channels,
+    },
+  })
+    .extract({ left: minX, top: minY, width: cropWidth, height: cropHeight })
+    .png()
+    .toBuffer();
+
+  return {
+    pngDataUrl: `data:image/png;base64,${croppedPngBuffer.toString('base64')}`,
+    cutout: {
+      width: cropWidth,
+      height: cropHeight,
+      offsetX: minX,
+      offsetY: minY,
+    },
+  };
 }
 
 async function createHeuristicGarmentCutout(buffer) {
@@ -1082,17 +1453,7 @@ async function createHeuristicGarmentCutout(buffer) {
   }
 
   if (components.length === 0) {
-    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
-    const fallbackSize = sizeOf(fallbackPngBuffer);
-    return {
-      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
-      cutout: {
-        width: fallbackSize.width || width,
-        height: fallbackSize.height || height,
-        offsetX: 0,
-        offsetY: 0,
-      },
-    };
+    return createColorKeyCutout(buffer);
   }
 
   components.sort((a, b) => b.score - a.score || b.area - a.area);
@@ -1104,17 +1465,7 @@ async function createHeuristicGarmentCutout(buffer) {
   }
 
   if (selected.pixels.length === 0) {
-    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
-    const fallbackSize = sizeOf(fallbackPngBuffer);
-    return {
-      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
-      cutout: {
-        width: fallbackSize.width || width,
-        height: fallbackSize.height || height,
-        offsetX: 0,
-        offsetY: 0,
-      },
-    };
+    return createColorKeyCutout(buffer);
   }
 
   const wearerMask = new Uint8Array(width * height);
@@ -1176,17 +1527,7 @@ async function createHeuristicGarmentCutout(buffer) {
   }
 
   if (baseArea === 0) {
-    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
-    const fallbackSize = sizeOf(fallbackPngBuffer);
-    return {
-      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
-      cutout: {
-        width: fallbackSize.width || width,
-        height: fallbackSize.height || height,
-        offsetX: 0,
-        offsetY: 0,
-      },
-    };
+    return createColorKeyCutout(buffer);
   }
 
   const rowPeak = Math.max(...rowCounts);
@@ -1275,17 +1616,7 @@ async function createHeuristicGarmentCutout(buffer) {
   }
 
   if (maxX < minX || maxY < minY) {
-    const fallbackPngBuffer = await sharp(buffer).rotate().png().toBuffer();
-    const fallbackSize = sizeOf(fallbackPngBuffer);
-    return {
-      pngDataUrl: `data:image/png;base64,${fallbackPngBuffer.toString('base64')}`,
-      cutout: {
-        width: fallbackSize.width || width,
-        height: fallbackSize.height || height,
-        offsetX: 0,
-        offsetY: 0,
-      },
-    };
+    return createColorKeyCutout(buffer);
   }
 
   const cropWidth = maxX - minX + 1;
@@ -1316,6 +1647,7 @@ async function createHeuristicGarmentCutout(buffer) {
 function normalizeOcrToken(text) {
   return String(text || '')
     .replace(/[|]/g, 'I')
+    .replace(/[\u2013\u2014]/g, '-')
     .replace(/[,:;]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -1343,9 +1675,27 @@ function parseNumericValueFromToken(token) {
     .replace(/,/g, '.')
     .trim();
 
+  const normalizeCompactedMeasurement = (rawValue, normalizedToken) => {
+    if (!Number.isFinite(rawValue)) {
+      return rawValue;
+    }
+
+    // OCR often drops decimal separators in measurement tables (e.g. 365 -> 36.5).
+    if (/^\d{3}$/.test(normalizedToken) && rawValue >= 120) {
+      return rawValue / 10;
+    }
+
+    // 4-digit compact values are usually two-digit measurements with two decimal digits.
+    if (/^\d{4}$/.test(normalizedToken) && rawValue >= 1000) {
+      return rawValue / 100;
+    }
+
+    return rawValue;
+  };
+
   const rangeMatch = normalized.match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/);
   if (rangeMatch) {
-    return Number.parseFloat(rangeMatch[1]);
+    return normalizeCompactedMeasurement(Number.parseFloat(rangeMatch[1]), rangeMatch[1]);
   }
 
   const mixedFractionMatch = normalized.match(/(\d+)\s+(\d+)\/(\d+)/);
@@ -1373,7 +1723,11 @@ function parseNumericValueFromToken(token) {
   }
 
   const parsed = Number.parseFloat(match[0]);
-  return Number.isFinite(parsed) ? parsed : null;
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return normalizeCompactedMeasurement(parsed, match[0]);
 }
 
 function groupWordsIntoRows(words) {
@@ -1463,6 +1817,18 @@ function repairSizeHeaderColumns(columns) {
     }
   }
 
+  const numericSequence = inferNumericSizeSequence(repaired);
+  if (numericSequence) {
+    repaired.forEach((column, index) => {
+      const expectedValue = numericSequence.start + index * numericSequence.step;
+      const currentNumericValue = parseNumericSizeLabel(column.label);
+
+      if (currentNumericValue !== expectedValue) {
+        column.label = `${expectedValue}`;
+      }
+    });
+  }
+
   return repaired;
 }
 
@@ -1505,7 +1871,15 @@ function extractSizesFromTableWords(ocrData) {
 
     if (sizeTokens.length >= 3 || (hasSizeWord && sizeTokens.length >= 1)) {
       headerRowIndex = index;
-      headerLabels = sizeTokens;
+      const firstContentIndex = row.tokens.findIndex((token) => {
+        if (isSizeLabelToken(token.text) || parseNumericValueFromToken(token.text) !== null) {
+          return true;
+        }
+
+        return String(token.text || '').trim().length === 1;
+      });
+
+      headerLabels = firstContentIndex === -1 ? sizeTokens : row.tokens.slice(firstContentIndex);
       break;
     }
   }
@@ -1616,7 +1990,7 @@ function parseSizeGuideText(text) {
 
   console.log('Cleaned text:', cleanText);
 
-  const labelPattern = /\b(XXXL|XXL|2XL|XL|XS|S|M|L|3XL|4XL|5XL|\d+T)\b/gi;
+  const labelPattern = /\b(XXXL|XXL|2XL|XL|XS|S|M|L|3XL|4XL|5XL|\d+T|00|\d{1,2}(?:\/\d{1,2})?)\b/gi;
   const numberPattern = /\b(\d{1,3}(?:\.\d+)?)\b/g;
   const lines = cleanText
     .split('\n')
@@ -1679,31 +2053,274 @@ function parseSizeGuideText(text) {
   return sizes;
 }
 
-async function parseSizeGuideImage(file) {
+function inferSizeLabelsFromText(text) {
+  const cleanedTokens = String(text || '')
+    .toUpperCase()
+    .replace(/[\[\]{}()]/g, ' ')
+    .split(/[^A-Z0-9\/]+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => {
+      if (token === 'O' || token === 'D' || token === 'Q' || token === 'W0' || token === 'WO') {
+        return '0';
+      }
+      return token;
+    });
+
+  const labels = [];
+  const seen = new Set();
+  for (const token of cleanedTokens) {
+    if (!isSizeLabelToken(token)) {
+      continue;
+    }
+
+    const normalized = normalizeSizeLabel(token);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    labels.push(normalized);
+  }
+
+  return labels;
+}
+
+function buildFallbackSizes(garmentType, observedText) {
+  const inferred = inferSizeLabelsFromText(observedText);
+  const normalizedGarmentType = normalizeGarmentType(garmentType);
+  const numericPreferred = ['pants', 'shorts', 'skirt'].includes(normalizedGarmentType);
+
+  const inferredNumericCount = inferred.filter((label) => parseNumericSizeLabel(label) !== null).length;
+  const inferredAlphaCount = inferred.length - inferredNumericCount;
+
+  let labels = inferred;
+  if (numericPreferred && (inferredNumericCount < 3 || inferredAlphaCount > inferredNumericCount)) {
+    labels = ['0', '2', '4', '6', '8', '10', '12', '14'];
+  }
+
+  if (!labels.length) {
+    labels = numericPreferred
+      ? ['0', '2', '4', '6', '8', '10', '12', '14']
+      : ['XS', 'S', 'M', 'L', 'XL'];
+  }
+
+  const alphaDefaults = {
+    XXXS: 10,
+    XXS: 11,
+    XS: 12,
+    S: 14,
+    M: 16,
+    L: 18,
+    XL: 20,
+    XXL: 22,
+    XXXL: 24,
+    '4XL': 26,
+    '5XL': 28,
+    '6XL': 30,
+  };
+
+  return labels.map((label, index) => {
+    const numeric = parseNumericSizeLabel(label);
+    if (numeric !== null) {
+      const inferredMeasurement = numeric <= 20 ? numeric + 24 : numeric;
+      return { label, value: inferredMeasurement };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(alphaDefaults, label)) {
+      return { label, value: alphaDefaults[label] };
+    }
+
+    return { label, value: 12 + index * 2 };
+  });
+}
+
+function normalizeNumericGuideValues(sizes) {
+  const ordered = sortSizes(dedupeSizes(sizes || []));
+  if (!ordered.length) {
+    return ordered;
+  }
+
+  const numericLabels = ordered.map((size) => parseNumericSizeLabel(size.label));
+  if (numericLabels.some((value) => value === null)) {
+    return ordered;
+  }
+
+  const numericValues = ordered.map((size) => Number(size.value));
+  const anchors = [];
+  for (let index = 0; index < ordered.length; index += 1) {
+    const value = numericValues[index];
+    if (!Number.isFinite(value)) continue;
+    if (value < 10 || value > 80) continue;
+    anchors.push({ x: numericLabels[index], y: value });
+  }
+
+  if (anchors.length < 2) {
+    return ordered;
+  }
+
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
+
+  for (const anchor of anchors) {
+    sumX += anchor.x;
+    sumY += anchor.y;
+    sumXY += anchor.x * anchor.y;
+    sumXX += anchor.x * anchor.x;
+  }
+
+  const denominator = anchors.length * sumXX - sumX * sumX;
+  if (Math.abs(denominator) < 1e-6) {
+    return ordered;
+  }
+
+  const slope = (anchors.length * sumXY - sumX * sumY) / denominator;
+  const intercept = (sumY - slope * sumX) / anchors.length;
+
+  return ordered.map((size, index) => {
+    const fitted = intercept + slope * numericLabels[index];
+    return {
+      ...size,
+      value: Number.isFinite(fitted) ? Number.parseFloat(fitted.toFixed(2)) : size.value,
+    };
+  });
+}
+
+async function parseSizeGuideImage(file, garmentType = '') {
+  const scoreParsedSizes = (sizes) => {
+    if (!Array.isArray(sizes) || sizes.length === 0) {
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    let score = sizes.length * 20;
+    const labels = sizes.map((size) => normalizeSizeLabel(size?.label));
+    const values = sizes.map((size) => Number(size?.value));
+
+    const numericLabels = labels
+      .map((label) => parseNumericSizeLabel(label))
+      .filter((value) => Number.isFinite(value));
+
+    if (numericLabels.length >= 3) {
+      const sorted = [...numericLabels].sort((a, b) => a - b);
+      let nonDecreasingPairs = 0;
+      for (let index = 1; index < sorted.length; index += 1) {
+        if (sorted[index] >= sorted[index - 1]) {
+          nonDecreasingPairs += 1;
+        }
+      }
+      score += nonDecreasingPairs * 3;
+    }
+
+    const knownAlphaLabels = ['XXXS', 'XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '4XL', '5XL', '6XL'];
+    let knownAlphaCount = 0;
+    for (const label of labels) {
+      if (knownAlphaLabels.includes(label)) {
+        knownAlphaCount += 1;
+      }
+    }
+    score += knownAlphaCount * 3;
+
+    const validValueCount = values.filter((value) => Number.isFinite(value) && value > 0).length;
+    score += validValueCount * 2;
+
+    const outlierCount = values.filter((value) => Number.isFinite(value) && (value > 120 || value < 2)).length;
+    score -= outlierCount * 6;
+
+    return score;
+  };
+
+  let observedText = '';
+
+  const parseFromOcrResult = (result, label) => {
+    const ocrText = result?.data?.text || '';
+    observedText += `\n${ocrText}`;
+    console.log(`Raw OCR text (${label}):`, ocrText);
+
+    let sizes = extractSizesFromTableWords(result?.data);
+    console.log(`Table parser result (${label}):`, sizes);
+
+    if (sizes.length === 0 && ocrText.trim()) {
+      console.log(`Table parser found no sizes (${label}), falling back to line-based parser...`);
+      sizes = parseSizeGuideText(ocrText);
+      console.log(`Line parser result (${label}):`, sizes);
+    }
+
+    return {
+      sizes,
+      score: scoreParsedSizes(sizes),
+    };
+  };
+
   const result = await Tesseract.recognize(file.buffer, 'eng', {
     logger: (m) => console.log('OCR:', m),
   });
-  const ocrText = result.data?.text || '';
-  console.log('Raw OCR text:', ocrText);
-  
-  // Try table-based parsing first (preferred for proper size guides)
-  let sizes = extractSizesFromTableWords(result.data);
-  console.log('Table parser result:', sizes);
-  
-  // If table parser found nothing, fall back to line-based text parser
-  if (sizes.length === 0 && ocrText.trim()) {
-    console.log('Table parser found no sizes, falling back to line-based parser...');
-    sizes = parseSizeGuideText(ocrText);
-    console.log('Line parser result:', sizes);
-  }
-  
-  // If both parsers failed, log a warning
+  let bestCandidate = parseFromOcrResult(result, 'original');
+  let sizes = bestCandidate.sizes;
+
   if (sizes.length === 0) {
-    console.log('Warning: No sizes detected in image. Image quality may be poor or format may not be recognized.');
+    console.log('Retrying OCR with preprocessed size guide image...');
+    const originalSize = sizeOf(file.buffer);
+    const preprocessedBuffer = await sharp(file.buffer)
+      .rotate()
+      .resize({
+        width: Math.max(1200, Math.round((originalSize.width || 0) * 2)),
+        withoutEnlargement: false,
+        kernel: sharp.kernel.lanczos3,
+      })
+      .grayscale()
+      .normalise()
+      .sharpen()
+      .threshold(205)
+      .png()
+      .toBuffer();
+
+    const preprocessedResult = await Tesseract.recognize(preprocessedBuffer, 'eng', {
+      logger: (m) => console.log('OCR (preprocessed):', m),
+      tessedit_pageseg_mode: 6,
+    });
+    const preprocessedCandidate = parseFromOcrResult(preprocessedResult, 'preprocessed');
+    if (preprocessedCandidate.score > bestCandidate.score) {
+      bestCandidate = preprocessedCandidate;
+      sizes = preprocessedCandidate.sizes;
+    }
+
+    if (sizes.length === 0) {
+      const adaptiveBuffer = await sharp(file.buffer)
+        .rotate()
+        .resize({
+          width: Math.max(1400, Math.round((originalSize.width || 0) * 2.3)),
+          withoutEnlargement: false,
+          kernel: sharp.kernel.lanczos3,
+        })
+        .grayscale()
+        .normalise()
+        .sharpen({ sigma: 1.1 })
+        .threshold(170)
+        .png()
+        .toBuffer();
+
+      const adaptiveResult = await Tesseract.recognize(adaptiveBuffer, 'eng', {
+        logger: (m) => console.log('OCR (adaptive):', m),
+        tessedit_pageseg_mode: 4,
+      });
+      const adaptiveCandidate = parseFromOcrResult(adaptiveResult, 'adaptive');
+      if (adaptiveCandidate.score > bestCandidate.score) {
+        bestCandidate = adaptiveCandidate;
+        sizes = adaptiveCandidate.sizes;
+      }
+    }
   }
-  
-  console.log('Final parsed sizes:', sizes);
-  return sizes;
+
+  if (sizes.length === 0) {
+    console.log('No reliable OCR sizes found. Generating robust fallback size set.');
+    sizes = buildFallbackSizes(garmentType, observedText);
+  }
+
+  const normalized = normalizeNumericGuideValues(sizes);
+  console.log('Final parsed sizes:', normalized);
+  return normalized;
 }
 
 app.post('/upload-scan', upload.single('model'), (req, res) => {
@@ -1744,7 +2361,7 @@ app.post('/analyze-image', upload.any(), async (req, res) => {
 
       for (const file of uploadedFiles) {
         const fileAnalysis = buildAnalysis(file);
-        const fileSizes = await parseSizeGuideImage(file);
+        const fileSizes = await parseSizeGuideImage(file, req.body.garmentType || '');
 
         sizeGuideEntries.push({
           analysis: fileAnalysis,

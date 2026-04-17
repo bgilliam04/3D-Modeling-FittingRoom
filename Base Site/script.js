@@ -586,7 +586,7 @@ if (analyzeButton) {
         setClothingOverlay(clothingFile);
       }
 
-      const sizeGuideResult = await analyzeImages(sizeGuideFiles, 'sizeGuide');
+      const sizeGuideResult = await analyzeImages(sizeGuideFiles, 'sizeGuide', garmentType);
       const sizeGuideAnalyses = sizeGuideResult.sizeGuideEntries
         ? sizeGuideResult.sizeGuideEntries.map((entry) => entry.analysis)
         : (sizeGuideResult.analyses || (sizeGuideResult.analysis ? [sizeGuideResult.analysis] : []));
