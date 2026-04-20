@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "lib": ["DOM", "ESNext"],
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "allowJs": true,
+    "target": "ES6",
+    "moduleResolution": "bundler",
+    "module": "es2020"
+  }
+}

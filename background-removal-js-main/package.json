@@ -1,0 +1,42 @@
+{
+  "version": "1.7.0",
+  "name": "workspace",
+  "private": true,
+  "bin": {
+    "changelog-create": "./scripts/changelog/changelog-create.mjs",
+    "changelog-generate": "./scripts/changelog/changelog-generate.mjs"
+  },
+  "files": [],
+  "scripts": {
+    "start": "pnpm run watch",
+    "watch": "concurrently \"pnpm run watch --prefix packages/web\" \"pnpm run watch --prefix packages/node\"",
+    "build": "pnpm recursive run build",
+    "lint:fix": "npx prettier -c -w --ignore-unknown .",
+    "lint:check": "npx prettier -c --ignore-unknown .",
+    "publish:latest": "pnpm run publish:latest --workspaces --if-present && pnpm run deploy-assets",
+    "publish:next": "pnpm run publish:next --workspaces --if-present && pnpm run deploy-assets",
+    "package:version": "node ./scripts/package-version.mjs",
+    "deploy-assets": "node -r dotenv/config ./scripts/deploy-assets.mjs",
+    "tag": "git tag $npm_package_version & git push origin $npm_package_version",
+    "package:pack": "pnpm run package:pack --workspaces --if-present",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "chalk": "~5.3.0",
+    "concurrently": "~8.2.2",
+    "dotenv": "~16.3.1",
+    "ejs": "~3.1.9",
+    "es-main": "~1.3.0",
+    "esbuild": "^0.21.1",
+    "glob": "~10.3.3",
+    "husky": "^9.0.11",
+    "lint-staged": "^15.2.2",
+    "meow": "~13.0.0",
+    "moment": "~2.29.4",
+    "onchange": "~7.1.0",
+    "prettier": "^3.5.3",
+    "rimraf": "^6.0.1",
+    "yaml": "~2.3.4"
+  },
+  "packageManager": "pnpm@10.6.5+sha512.cdf928fca20832cd59ec53826492b7dc25dc524d4370b6b4adbf65803d32efaa6c1c88147c0ae4e8d579a6c9eec715757b50d4fa35eea179d868eada4ed043af"
+}

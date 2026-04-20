@@ -1,0 +1,51 @@
+{
+  "name": "@imgly/background-removal-data",
+  "version": "1.7.0",
+  "description": "Background Removal Data",
+  "keywords": [
+    "background-removal",
+    "image-segmentation",
+    "image-matting",
+    "onnx"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imgly/background-removal-js.git"
+  },
+  "license": "SEE LICENSE IN LICENSE.md",
+  "author": {
+    "name": "IMG.LY GmbH",
+    "email": "support@img.ly",
+    "url": "https://img.ly"
+  },
+  "bugs": {
+    "email": "support@img.ly"
+  },
+  "homepage": "https://img.ly/showcases/cesdk/web/background-removal",
+  "files": [
+    "LICENSE.md",
+    "README.md",
+    "CHANGELOG.md",
+    "NOTICE.md",
+    "ThirdPartyLicenses.json",
+    "dist/",
+    "bin/"
+  ],
+  "scripts": {
+    "start": "pnpm run watch",
+    "serve": "npx http-server dist --cors",
+    "clean": "npx rimraf dist",
+    "test": "true",
+    "resources": "node ../../scripts/package-resources.mjs",
+    "changelog:create": "node ../../scripts/changelog/changelog-create.mjs",
+    "changelog:generate": "node ../../scripts/changelog/changelog-generate.mjs",
+    "build": "pnpm run clean && pnpm run resources",
+    "watch": "pnpm run clean && pnpm run resources",
+    "publish:latest": "pnpm publish --tag latest --access public",
+    "publish:next": "pnpm publish --tag next --access public",
+    "package:pack": "pnpm pack . --pack-destination ../../releases"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.21.0-dev.20250206-d981b153d3"
+  }
+}

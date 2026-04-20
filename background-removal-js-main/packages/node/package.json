@@ -1,0 +1,88 @@
+{
+  "name": "@imgly/background-removal-node",
+  "version": "1.7.0",
+  "description": "Background Removal in NodeJS",
+  "resources": "@imgly/background-removal-node",
+  "keywords": [
+    "background-removal",
+    "nodejs",
+    "image-segmentation",
+    "image-matting",
+    "onnx"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imgly/background-removal-js.git"
+  },
+  "license": "SEE LICENSE IN LICENSE.md",
+  "author": {
+    "name": "IMG.LY GmbH",
+    "email": "support@img.ly",
+    "url": "https://img.ly"
+  },
+  "bugs": {
+    "email": "support@img.ly"
+  },
+  "homepage": "https://img.ly/showcases/cesdk/web/background-removal",
+  "source": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "LICENSE.md",
+    "README.md",
+    "CHANGELOG.md",
+    "ThirdPartyLicenses.json",
+    "dist/",
+    "bin/"
+  ],
+  "scripts": {
+    "start": "pnpm run watch",
+    "clean": "npx rimraf dist",
+    "test": "true",
+    "resources": "node ../../scripts/package-resources.mjs",
+    "changelog:create": "node ../../scripts/changelog/changelog-create.mjs",
+    "changelog:generate": "node ../../scripts/changelog/changelog-generate.mjs",
+    "build": "pnpm run clean && pnpm run resources && pnpm run types && pnpm run changelog:generate && node scripts/build.mjs",
+    "types": "tsc --declaration --emitDeclarationOnly --declarationDir dist --declarationMap",
+    "watch": "pnpm run clean && pnpm run resources && pnpm run changelog:generate && node scripts/watch.mjs",
+    "check:all": "pnpm run check:pretty",
+    "check:pretty": "prettier --list-different './src/**/*.{ts,tsx}'",
+    "pretty": "prettier --write './src/**/*.{ts,tsx}'",
+    "publish:latest": "pnpm publish --tag latest --access public",
+    "publish:next": "pnpm publish --tag next --access public",
+    "package:pack": "pnpm pack . --pack-destination ../../releases"
+  },
+  "dependencies": {
+    "@types/lodash": "~4.14.195",
+    "@types/ndarray": "~1.0.14",
+    "@types/node": "~20.3.1",
+    "lodash": "~4.17.21",
+    "ndarray": "~1.0.19",
+    "onnxruntime-node": "1.21.0",
+    "sharp": "~0.32.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "assert": "~2.0.0",
+    "esbuild": "~0.18.18",
+    "npm-dts": "~1.3.12",
+    "os-browserify": "~0.3.0",
+    "path-browserify": "~1.0.1",
+    "process": "~0.11.10",
+    "stream-browserify": "~3.0.0",
+    "ts-loader": "~9.4.3",
+    "tslib": "~2.5.3",
+    "typescript": "~5.1.6",
+    "util": "~0.12.5",
+    "webpack": "~5.85.1",
+    "webpack-cli": "~5.1.4"
+  }
+}
