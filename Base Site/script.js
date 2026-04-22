@@ -2,6 +2,13 @@ const navToggle = document.getElementById('navToggle');
 const siteNav = document.getElementById('siteNav');
 const contactForm = document.getElementById('contactForm');
 const formStatus = document.getElementById('formStatus');
+const themeSwitcher = document.getElementById('themeSwitcher');
+
+if (themeSwitcher) {
+  themeSwitcher.addEventListener('change', (e) => {
+    document.body.className = e.target.value;
+  });
+}
 
 if (navToggle && siteNav) {
   navToggle.addEventListener('click', () => {
