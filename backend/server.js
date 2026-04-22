@@ -11,6 +11,8 @@ const { removeBackground } = require('@imgly/background-removal-node');
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const PORT = process.env.PORT || 4000;
+const XCLOTH_INFER_URL = process.env.XCLOTH_INFER_URL || 'http://127.0.0.1:8008/infer';
+const XCLOTH_TIMEOUT_MS = Number.parseInt(process.env.XCLOTH_TIMEOUT_MS || '25000', 10);
 
 app.use(cors());
 app.use(express.json());
@@ -303,18 +305,83 @@ function normalizeGarmentType(garmentType) {
   return Object.prototype.hasOwnProperty.call(GARMENT_LABELS, normalized) ? normalized : 'shirt';
 }
 
-function isSkinTonePixel(red, green, blue) {
+function isSkinTonePixel(red, green, blue, minVotes = 2) {
+  const toHsv = (r, g, b) => {
+    const rn = r / 255;
+    const gn = g / 255;
+    const bn = b / 255;
+    const max = Math.max(rn, gn, bn);
+    const min = Math.min(rn, gn, bn);
+    const delta = max - min;
+
+    let hue = 0;
+    if (delta !== 0) {
+      if (max === rn) {
+        hue = ((gn - bn) / delta) % 6;
+      } else if (max === gn) {
+        hue = (bn - rn) / delta + 2;
+      } else {
+        hue = (rn - gn) / delta + 4;
+      }
+      hue *= 60;
+      if (hue < 0) hue += 360;
+    }
+
+    const saturation = max === 0 ? 0 : delta / max;
+    return { hue, saturation, value: max };
+  };
+
+  const toYCbCr = (r, g, b) => {
+    const y = 0.299 * r + 0.587 * g + 0.114 * b;
+    const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+    const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+    return { y, cb, cr };
+  };
+
   const maxChannel = Math.max(red, green, blue);
   const minChannel = Math.min(red, green, blue);
   const chroma = maxChannel - minChannel;
+  const sum = red + green + blue;
 
-  if (red < 85 || green < 35 || blue < 15) return false;
-  if (chroma < 10) return false;
-  if (Math.abs(red - green) < 12) return false;
+  if (sum <= 0 || chroma < 8) return false;
+
+  const { hue, saturation, value } = toHsv(red, green, blue);
+  const { y, cb, cr } = toYCbCr(red, green, blue);
+
+  const normalizedR = red / sum;
+  const normalizedG = green / sum;
+
+  // Broad normalized-rgb gate to include diverse tones while excluding obvious non-skin hues.
+  const normalizedRule =
+    normalizedR >= 0.28 && normalizedR <= 0.58 &&
+    normalizedG >= 0.18 && normalizedG <= 0.42 &&
+    normalizedR > normalizedG;
+
+  // Wide YCbCr region that captures light to dark skin tones better than fixed RGB limits.
+  const ycbcrRule =
+    y >= 20 && y <= 245 &&
+    cb >= 65 && cb <= 148 &&
+    cr >= 115 && cr <= 188;
+
+  // HSV safety net for warm hues at different brightness/saturation levels.
+  const warmHue = (hue >= 0 && hue <= 58) || (hue >= 330 && hue <= 360);
+  const hsvRule = warmHue && saturation >= 0.08 && saturation <= 0.78 && value >= 0.08 && value <= 0.98;
+
+  let votes = 0;
+  if (normalizedRule) votes += 1;
+  if (ycbcrRule) votes += 1;
+  if (hsvRule) votes += 1;
+
+  if (votes >= minVotes) {
+    return true;
+  }
+
+  // Fallback legacy rule only applies in strict mode.
+  if (minVotes < 2) return false;
+  if (red < 65 || green < 25 || blue < 10) return false;
+  if (Math.abs(red - green) < 10) return false;
   if (red <= green || red <= blue) return false;
-
-  const saturation = maxChannel === 0 ? 0 : chroma / maxChannel;
-  return saturation > 0.08;
+  return (maxChannel === 0 ? 0 : chroma / maxChannel) > 0.06;
 }
 
 function estimateSkinRatioInBox(rawData, width, height, channels, box) {
@@ -709,23 +776,52 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
     return keepMask;
   };
 
-  const keepMask = selectMainComponent(mask, centerX, centerY);
+  const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
+  const preserveBottomEdge = lowerBodyGarments.has(garmentType);
+  const skipLowerBand = preserveBottomEdge;
 
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      if (keepMask[index]) continue;
-      const offset = index * channels;
-      data[offset + 3] = 0;
+  const countOpaquePixels = () => {
+    let count = 0;
+    for (let i = 3; i < data.length; i += channels) {
+      if (data[i] > 0) {
+        count += 1;
+      }
     }
-  }
+    return count;
+  };
 
-  // Remove attached wearer skin clusters (hands/arms/neck/legs) from all garment masks.
-  {
+  let previousOpaquePixels = -1;
+  const maxCleanupPasses = 5;
+
+  for (let cleanupPass = 0; cleanupPass < maxCleanupPasses; cleanupPass += 1) {
+    const passMask = new Uint8Array(width * height);
+    let passOpaquePixels = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] > 0) {
+          passMask[index] = 1;
+          passOpaquePixels += 1;
+        }
+      }
+    }
+
+    if (passOpaquePixels === 0) {
+      break;
+    }
+
+    const keepMask = selectMainComponent(passMask, centerX, centerY);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (keepMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+
     const skinMask = new Uint8Array(width * height);
-    const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
-    const skipLowerBand = lowerBodyGarments.has(garmentType);
-
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const index = y * width + x;
@@ -733,9 +829,8 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
 
         const offset = index * channels;
         if (data[offset + 3] === 0) continue;
-
-        // For lower-body garments, preserve a small bottom band to reduce hem clipping.
-        if (skipLowerBand && y > Math.round(height * 0.9)) continue;
+        const bottomProtectionStart = skipLowerBand ? 0.96 : 1;
+        if (skipLowerBand && y > Math.round(height * bottomProtectionStart)) continue;
 
         if (isSkinTonePixel(data[offset], data[offset + 1], data[offset + 2])) {
           skinMask[index] = 1;
@@ -743,8 +838,7 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
       }
     }
 
-    // Expand the mask so connected skin-adjacent edges are removed too.
-    const expansionPasses = 2;
+    const expansionPasses = 5;
     for (let pass = 0; pass < expansionPasses; pass += 1) {
       const expanded = new Uint8Array(width * height);
 
@@ -758,6 +852,10 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
           if (x < width - 1) expanded[index + 1] = 1;
           if (y > 0) expanded[index - width] = 1;
           if (y < height - 1) expanded[index + width] = 1;
+          if (x > 0 && y > 0) expanded[index - width - 1] = 1;
+          if (x < width - 1 && y > 0) expanded[index - width + 1] = 1;
+          if (x > 0 && y < height - 1) expanded[index + width - 1] = 1;
+          if (x < width - 1 && y < height - 1) expanded[index + width + 1] = 1;
         }
       }
 
@@ -772,94 +870,165 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
         data[offset + 3] = 0;
       }
     }
-  }
 
-  // Second pass: trim weak alpha remnants then keep the strongest remaining component again.
-  const secondPassAlphaThreshold = 144;
-  const secondMask = new Uint8Array(width * height);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      const offset = index * channels;
+    // Edge-adjacent loose propagation: pixels that touch confirmed-skin-removed areas
+    // get a single-vote check so gradients and transition pixels are fully erased.
+    const edgeSkinMask = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] === 0) continue;
+        if (skipLowerBand && y > Math.round(height * 0.96)) continue;
 
-      if (!keepMask[index] || data[offset + 3] < secondPassAlphaThreshold) {
-        data[offset + 3] = 0;
-        continue;
+        const adjacentToSkin =
+          (y > 0 && skinMask[index - width]) ||
+          (y < height - 1 && skinMask[index + width]) ||
+          (x > 0 && skinMask[index - 1]) ||
+          (x < width - 1 && skinMask[index + 1]) ||
+          (x > 0 && y > 0 && skinMask[index - width - 1]) ||
+          (x < width - 1 && y > 0 && skinMask[index - width + 1]) ||
+          (x > 0 && y < height - 1 && skinMask[index + width - 1]) ||
+          (x < width - 1 && y < height - 1 && skinMask[index + width + 1]);
+
+        if (!adjacentToSkin) continue;
+
+        if (isSkinTonePixel(data[offset], data[offset + 1], data[offset + 2], 1)) {
+          edgeSkinMask[index] = 1;
+        }
       }
-
-      secondMask[index] = 1;
     }
-  }
-
-  const secondKeepMask = selectMainComponent(secondMask, centerX, centerY);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      if (secondKeepMask[index]) continue;
-      const offset = index * channels;
-      data[offset + 3] = 0;
-    }
-  }
-
-  // Garment-only hardening: remove remaining border-connected foreground.
-  // For lower-body garments, keep bottom-connected pixels to avoid clipping skirt hems.
-  const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
-  const preserveBottomEdge = lowerBodyGarments.has(garmentType);
-  const borderConnected = new Uint8Array(width * height);
-  const queue = [];
-  let queueHead = 0;
-
-  const enqueueBorderConnected = (x, y) => {
-    if (x < 0 || y < 0 || x >= width || y >= height) return;
-    const index = y * width + x;
-    if (borderConnected[index]) return;
-    const offset = index * channels;
-    if (data[offset + 3] === 0) return;
-
-    borderConnected[index] = 1;
-    queue.push(index);
-  };
-
-  for (let x = 0; x < width; x += 1) {
-    enqueueBorderConnected(x, 0);
-    if (!preserveBottomEdge) {
-      enqueueBorderConnected(x, height - 1);
-    }
-  }
-  for (let y = 0; y < height; y += 1) {
-    enqueueBorderConnected(0, y);
-    enqueueBorderConnected(width - 1, y);
-  }
-
-  while (queueHead < queue.length) {
-    const current = queue[queueHead++];
-    const x = current % width;
-    const y = Math.floor(current / width);
-
-    enqueueBorderConnected(x + 1, y);
-    enqueueBorderConnected(x - 1, y);
-    enqueueBorderConnected(x, y + 1);
-    enqueueBorderConnected(x, y - 1);
-  }
-
-  const borderCleanMask = new Uint8Array(width * height);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      const offset = index * channels;
-      if (data[offset + 3] === 0 || borderConnected[index]) {
-        data[offset + 3] = 0;
-        continue;
+    for (let ep = 0; ep < 2; ep += 1) {
+      const edgeExpanded = new Uint8Array(width * height);
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const index = y * width + x;
+          if (!edgeSkinMask[index]) continue;
+          edgeExpanded[index] = 1;
+          if (x > 0) edgeExpanded[index - 1] = 1;
+          if (x < width - 1) edgeExpanded[index + 1] = 1;
+          if (y > 0) edgeExpanded[index - width] = 1;
+          if (y < height - 1) edgeExpanded[index + width] = 1;
+        }
       }
-      borderCleanMask[index] = 1;
+      edgeSkinMask.set(edgeExpanded);
     }
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (!edgeSkinMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+
+    const secondPassAlphaThreshold = Math.min(180, 144 + cleanupPass * 8);
+    const secondMask = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] >= secondPassAlphaThreshold) {
+          secondMask[index] = 1;
+        } else {
+          data[offset + 3] = 0;
+        }
+      }
+    }
+
+    const secondKeepMask = selectMainComponent(secondMask, centerX, centerY);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (secondKeepMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+
+    const borderConnected = new Uint8Array(width * height);
+    const queue = [];
+    let queueHead = 0;
+
+    const enqueueBorderConnected = (x, y) => {
+      if (x < 0 || y < 0 || x >= width || y >= height) return;
+      const index = y * width + x;
+      if (borderConnected[index]) return;
+      const offset = index * channels;
+      if (data[offset + 3] === 0) return;
+
+      borderConnected[index] = 1;
+      queue.push(index);
+    };
+
+    for (let x = 0; x < width; x += 1) {
+      enqueueBorderConnected(x, 0);
+      if (!preserveBottomEdge) {
+        enqueueBorderConnected(x, height - 1);
+      }
+    }
+    for (let y = 0; y < height; y += 1) {
+      enqueueBorderConnected(0, y);
+      enqueueBorderConnected(width - 1, y);
+    }
+
+    while (queueHead < queue.length) {
+      const current = queue[queueHead++];
+      const x = current % width;
+      const y = Math.floor(current / width);
+
+      enqueueBorderConnected(x + 1, y);
+      enqueueBorderConnected(x - 1, y);
+      enqueueBorderConnected(x, y + 1);
+      enqueueBorderConnected(x, y - 1);
+    }
+
+    const borderCleanMask = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] === 0 || borderConnected[index]) {
+          data[offset + 3] = 0;
+          continue;
+        }
+        borderCleanMask[index] = 1;
+      }
+    }
+
+    const finalKeepMask = selectMainComponent(borderCleanMask, centerX, centerY);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (finalKeepMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+
+    const opaquePixels = countOpaquePixels();
+    if (opaquePixels === 0 || opaquePixels === previousOpaquePixels) {
+      break;
+    }
+    previousOpaquePixels = opaquePixels;
   }
 
-  const finalKeepMask = selectMainComponent(borderCleanMask, centerX, centerY);
+  const finalMask = new Uint8Array(width * height);
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
-      if (finalKeepMask[index]) continue;
+      const offset = index * channels;
+      if (data[offset + 3] > 0) {
+        finalMask[index] = 1;
+      }
+    }
+  }
+
+  const finalMainMask = selectMainComponent(finalMask, centerX, centerY);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (finalMainMask[index]) continue;
       const offset = index * channels;
       data[offset + 3] = 0;
     }
@@ -930,6 +1099,294 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
       offsetY,
     },
   };
+}
+
+function isValidTriMeshModel(model) {
+  if (!model || typeof model !== 'object') return false;
+  if (!Array.isArray(model.positions) || model.positions.length < 9 || model.positions.length % 3 !== 0) return false;
+  if (!Array.isArray(model.indices) || model.indices.length < 3 || model.indices.length % 3 !== 0) return false;
+  if (!Array.isArray(model.uvs) || model.uvs.length < 6 || model.uvs.length % 2 !== 0) return false;
+  return true;
+}
+
+function normalizeServiceGarmentModel(model, fallbackTextureDataUrl = null) {
+  if (!model || typeof model !== 'object') return null;
+
+  if (model.format === 'tri-mesh' && isValidTriMeshModel(model)) {
+    return {
+      framework: model.framework || 'xcloth',
+      format: 'tri-mesh',
+      positions: model.positions,
+      uvs: model.uvs,
+      indices: model.indices,
+      textureDataUrl: model.textureDataUrl || fallbackTextureDataUrl || null,
+      resolution: model.resolution || null,
+    };
+  }
+
+  if (typeof model.glbBase64 === 'string' && model.glbBase64.length > 0) {
+    return {
+      framework: model.framework || 'xcloth',
+      format: 'glb-base64',
+      glbDataUrl: `data:model/gltf-binary;base64,${model.glbBase64}`,
+      textureDataUrl: fallbackTextureDataUrl || null,
+    };
+  }
+
+  return null;
+}
+
+async function inferGarment3DWithXClothService(inputBuffer, garmentType, mimeType, cutoutDataUrl = null) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(5000, XCLOTH_TIMEOUT_MS));
+
+  try {
+    const form = new FormData();
+    form.append('image', new Blob([inputBuffer], { type: mimeType || 'image/png' }), 'garment.png');
+    form.append('garmentType', normalizeGarmentType(garmentType || 'shirt'));
+    if (cutoutDataUrl) {
+      form.append('cutoutDataUrl', cutoutDataUrl);
+    }
+
+    const response = await fetch(XCLOTH_INFER_URL, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const details = await response.text().catch(() => 'Unknown xCloth service error');
+      throw new Error(`xCloth service returned HTTP ${response.status}: ${details.slice(0, 300)}`);
+    }
+
+    const payload = await response.json();
+    const normalized = normalizeServiceGarmentModel(payload?.garmentModel || payload?.model || payload, cutoutDataUrl);
+
+    if (!normalized) {
+      throw new Error('xCloth service response did not include a valid garment model payload.');
+    }
+
+    return normalized;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt', mimeType = '') {
+  const cutoutResult = await createGarmentCutout(buffer, garmentType, mimeType);
+  const cutoutDataUrl = cutoutResult?.pngDataUrl || null;
+
+  if (!cutoutDataUrl || !cutoutDataUrl.startsWith('data:image/png;base64,')) {
+    return {
+      ...cutoutResult,
+      garmentModel: null,
+    };
+  }
+
+  const cutoutBuffer = Buffer.from(cutoutDataUrl.split(',')[1], 'base64');
+  const { data, info } = await sharp(cutoutBuffer)
+    .resize({ width: 96, height: 96, fit: 'inside', withoutEnlargement: true })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const width = info.width || 0;
+  const height = info.height || 0;
+  const channels = info.channels || 4;
+  const pixelCount = width * height;
+
+  if (pixelCount <= 0) {
+    return {
+      ...cutoutResult,
+      garmentModel: null,
+    };
+  }
+
+  const mask = new Uint8Array(pixelCount);
+  const distance = new Float32Array(pixelCount);
+  const queue = new Int32Array(pixelCount);
+  let queueStart = 0;
+  let queueEnd = 0;
+  let foregroundCount = 0;
+
+  for (let index = 0; index < pixelCount; index += 1) {
+    const alpha = data[index * channels + 3];
+    if (alpha > 24) {
+      mask[index] = 1;
+      distance[index] = Number.POSITIVE_INFINITY;
+      foregroundCount += 1;
+    } else {
+      distance[index] = 0;
+      queue[queueEnd++] = index;
+    }
+  }
+
+  if (foregroundCount < 24) {
+    return {
+      ...cutoutResult,
+      garmentModel: null,
+    };
+  }
+
+  // Multi-source distance transform from background to approximate layered depth.
+  while (queueStart < queueEnd) {
+    const current = queue[queueStart++];
+    const cx = current % width;
+    const cy = Math.floor(current / width);
+    const nextDistance = distance[current] + 1;
+
+    if (cx > 0) {
+      const left = current - 1;
+      if (nextDistance < distance[left]) {
+        distance[left] = nextDistance;
+        queue[queueEnd++] = left;
+      }
+    }
+    if (cx < width - 1) {
+      const right = current + 1;
+      if (nextDistance < distance[right]) {
+        distance[right] = nextDistance;
+        queue[queueEnd++] = right;
+      }
+    }
+    if (cy > 0) {
+      const up = current - width;
+      if (nextDistance < distance[up]) {
+        distance[up] = nextDistance;
+        queue[queueEnd++] = up;
+      }
+    }
+    if (cy < height - 1) {
+      const down = current + width;
+      if (nextDistance < distance[down]) {
+        distance[down] = nextDistance;
+        queue[queueEnd++] = down;
+      }
+    }
+  }
+
+  let maxDistance = 1;
+  for (let index = 0; index < pixelCount; index += 1) {
+    if (!mask[index]) continue;
+    if (Number.isFinite(distance[index]) && distance[index] > maxDistance) {
+      maxDistance = distance[index];
+    }
+  }
+
+  const frontVertexMap = new Int32Array(pixelCount).fill(-1);
+  const backVertexMap = new Int32Array(pixelCount).fill(-1);
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+
+  const aspect = width / Math.max(1, height);
+  const scaleY = 1.35;
+  const scaleX = scaleY * aspect;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (!mask[index]) continue;
+
+      const offset = index * channels;
+      const red = data[offset];
+      const green = data[offset + 1];
+      const blue = data[offset + 2];
+      const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+
+      const distanceNorm = Math.min(1, (distance[index] || 0) / Math.max(1, maxDistance));
+      const wrinkle = (0.5 - luminance) * 0.02;
+      const frontZ = 0.018 + distanceNorm * 0.08 + wrinkle;
+      const backZ = -0.018 - distanceNorm * 0.05 + wrinkle * 0.35;
+
+      const xNorm = (x / Math.max(1, width - 1) - 0.5) * 2;
+      const yNorm = (0.5 - y / Math.max(1, height - 1)) * 2;
+      const px = xNorm * scaleX;
+      const py = yNorm * scaleY + 1.1;
+
+      const frontIndex = positions.length / 3;
+      positions.push(px, py, frontZ);
+      uvs.push(x / Math.max(1, width - 1), 1 - y / Math.max(1, height - 1));
+      frontVertexMap[index] = frontIndex;
+
+      const backIndex = positions.length / 3;
+      positions.push(px, py, backZ);
+      uvs.push(x / Math.max(1, width - 1), 1 - y / Math.max(1, height - 1));
+      backVertexMap[index] = backIndex;
+    }
+  }
+
+  for (let y = 0; y < height - 1; y += 1) {
+    for (let x = 0; x < width - 1; x += 1) {
+      const i00 = y * width + x;
+      const i10 = i00 + 1;
+      const i01 = i00 + width;
+      const i11 = i01 + 1;
+
+      const f00 = frontVertexMap[i00];
+      const f10 = frontVertexMap[i10];
+      const f01 = frontVertexMap[i01];
+      const f11 = frontVertexMap[i11];
+
+      if (f00 >= 0 && f10 >= 0 && f01 >= 0) {
+        indices.push(f00, f10, f01);
+      }
+      if (f10 >= 0 && f11 >= 0 && f01 >= 0) {
+        indices.push(f10, f11, f01);
+      }
+
+      const b00 = backVertexMap[i00];
+      const b10 = backVertexMap[i10];
+      const b01 = backVertexMap[i01];
+      const b11 = backVertexMap[i11];
+
+      if (b00 >= 0 && b01 >= 0 && b10 >= 0) {
+        indices.push(b00, b01, b10);
+      }
+      if (b10 >= 0 && b01 >= 0 && b11 >= 0) {
+        indices.push(b10, b01, b11);
+      }
+    }
+  }
+
+  const garmentModel = {
+    framework: 'xcloth-fallback',
+    format: 'tri-mesh',
+    positions,
+    uvs,
+    indices,
+    textureDataUrl: cutoutDataUrl,
+    resolution: {
+      width,
+      height,
+    },
+  };
+
+  return {
+    ...cutoutResult,
+    garmentModel,
+  };
+}
+
+async function createGarment3DModel(buffer, garmentType = 'shirt', mimeType = '') {
+  const cutoutResult = await createGarmentCutout(buffer, garmentType, mimeType);
+  const cutoutDataUrl = cutoutResult?.pngDataUrl || null;
+
+  if (cutoutDataUrl && cutoutDataUrl.startsWith('data:image/png;base64,')) {
+    try {
+      const cutoutBuffer = Buffer.from(cutoutDataUrl.split(',')[1], 'base64');
+      const serviceModel = await inferGarment3DWithXClothService(cutoutBuffer, garmentType, 'image/png', cutoutDataUrl);
+      return {
+        ...cutoutResult,
+        garmentModel: serviceModel,
+      };
+    } catch (error) {
+      console.warn('xCloth inference service unavailable, falling back to local approximation:', error.message);
+    }
+  }
+
+  const fallbackResult = await createApproxGarment3DModelFromCutout(buffer, garmentType, mimeType);
+  return fallbackResult;
 }
 
 async function createColorKeyCutout(buffer) {
@@ -2333,11 +2790,16 @@ app.post('/analyze-image', upload.any(), async (req, res) => {
       sizes = sortSizes(dedupeSizes(rawSizeEntries));
       console.log('Size guide processing complete. Sizes:', sizes);
     } else if (req.body.type === 'clothing') {
-      console.log('Processing as clothing cutout...');
-      const cutoutResult = await createGarmentCutout(primaryFile.buffer, req.body.garmentType, primaryFile.mimetype);
-      processedImageUrl = cutoutResult.pngDataUrl;
-      cutout = cutoutResult.cutout;
-      console.log('Clothing cutout complete:', cutout);
+      console.log('Processing as clothing 3D garment model...');
+      const garmentResult = await createGarment3DModel(primaryFile.buffer, req.body.garmentType, primaryFile.mimetype);
+      processedImageUrl = garmentResult.pngDataUrl;
+      cutout = garmentResult.cutout;
+      console.log('Garment model generation complete:', {
+        cutout,
+        hasModel: Boolean(garmentResult.garmentModel),
+        vertexCount: garmentResult.garmentModel ? Math.floor(garmentResult.garmentModel.positions.length / 3) : 0,
+      });
+      res.locals.garmentModel = garmentResult.garmentModel;
     } else {
       console.log('Processing as generic image');
     }
@@ -2352,6 +2814,7 @@ app.post('/analyze-image', upload.any(), async (req, res) => {
       sizes,
       processedImageUrl,
       cutout,
+      garmentModel: req.body.type === 'clothing' ? (res.locals.garmentModel || null) : undefined,
     });
   } catch (error) {
     console.error('Image analysis failed:', error);

@@ -57,6 +57,20 @@
             <input type="file" id="scanUpload" accept=".glb,.gltf" />
             <span class="upload-help">Allowed file types: .glb and .gltf.</span>
           </label>
+          <label class="upload-label" style="margin-top: 1rem;">
+            Model Height
+            <div style="display: flex; gap: 0.5rem;">
+              <div style="flex: 1;">
+                <input type="number" id="modelHeightFeetInput" min="3" max="8" step="1" value="5" placeholder="Feet" />
+                <span class="upload-help" style="font-size: 0.75rem;">Feet</span>
+              </div>
+              <div style="flex: 1;">
+                <input type="number" id="modelHeightInchesInput" min="0" max="11" step="0.5" value="8" placeholder="Inches" />
+                <span class="upload-help" style="font-size: 0.75rem;">Inches</span>
+              </div>
+            </div>
+            <span class="upload-help">Used to convert size-guide inches into real 3D garment scale.</span>
+          </label>
         </article>
         <article class="upload-card">
           <label class="upload-label">
@@ -135,11 +149,12 @@
 
   <footer class="site-footer">
     <p>2026 fitting room. This website's backend is made using AI via professors' directions; however the design and idea have been made by a team of students for "Start Up Term".</p>
+    <p> We also use the pipeline from xCloth (ISBN= 9781450392037 & Pages = 2504 - 2512) to generate the clothing.</p>
   </footer>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/three.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/examples/js/loaders/GLTFLoader.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r148/examples/js/controls/OrbitControls.js"></script>
+  <script src="vendor/three/three.min.js"></script>
+  <script src="vendor/three/GLTFLoader.js"></script>
+  <script src="vendor/three/OrbitControls.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
