@@ -6,7 +6,7 @@ const path = require('path');
 const sizeOf = require('image-size');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
-const { pipeline, RawImage } = require('@huggingface/transformers');
+const { removeBackground } = require('@imgly/background-removal-node');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -720,9 +720,11 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
     }
   }
 
-  // Skirt-specific cleanup: remove attached hand/arm regions by stripping skin-like clusters.
-  if (garmentType === 'skirt') {
+  // Remove attached wearer skin clusters (hands/arms/neck/legs) from all garment masks.
+  {
     const skinMask = new Uint8Array(width * height);
+    const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
+    const skipLowerBand = lowerBodyGarments.has(garmentType);
 
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
@@ -732,8 +734,8 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
         const offset = index * channels;
         if (data[offset + 3] === 0) continue;
 
-        // Skirt hands are most often near upper/mid garment area; avoid over-trimming lower hem.
-        if (y > Math.round(height * 0.8)) continue;
+        // For lower-body garments, preserve a small bottom band to reduce hem clipping.
+        if (skipLowerBand && y > Math.round(height * 0.9)) continue;
 
         if (isSkinTonePixel(data[offset], data[offset + 1], data[offset + 2])) {
           skinMask[index] = 1;
@@ -741,7 +743,7 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
       }
     }
 
-    // Expand the mask so connected bracelet/arm edges are removed with the skin pixels.
+    // Expand the mask so connected skin-adjacent edges are removed too.
     const expansionPasses = 2;
     for (let pass = 0; pass < expansionPasses; pass += 1) {
       const expanded = new Uint8Array(width * height);
@@ -872,111 +874,62 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
 
 async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '') {
   const normalizedGarmentType = normalizeGarmentType(garmentType);
-  const candidateLabels = getCandidateLabelsForGarment(normalizedGarmentType);
+  const orientedBuffer = await sharp(buffer).rotate().png().toBuffer();
+  const orientedPngBlob = new Blob([orientedBuffer], { type: 'image/png' });
+
+  const outputBlob = await removeBackground(orientedPngBlob, {
+    model: 'small',
+    output: {
+      quality: 0.8,
+      format: 'image/png',
+      type: 'foreground',
+    },
+  });
+
+  const outputArrayBuffer = await outputBlob.arrayBuffer();
+  const cutoutBuffer = Buffer.from(outputArrayBuffer);
+  let finalBuffer = cutoutBuffer;
+  let cutoutInfo = await sharp(cutoutBuffer).metadata();
+  let offsetX = 0;
+  let offsetY = 0;
 
   try {
-    const orientedBuffer = await sharp(buffer).rotate().png().toBuffer();
-    const image = await rawImageFromBuffer(orientedBuffer, 'image/png');
-    const orientedRaw = await sharp(orientedBuffer)
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    const detector = await getGarmentDetector();
-    const detections = await detector(image, candidateLabels, { threshold: 0.08, top_k: 5 });
+    const cutoutRawImage = await rawImageFromBuffer(cutoutBuffer, 'image/png');
+    const refined = refineCutoutMask(cutoutRawImage, normalizedGarmentType);
 
-    if (!detections || detections.length === 0) {
-      throw new Error('No garment detected.');
+    if (refined && refined.image) {
+      const refinedPngBuffer = await rawImageToPngBuffer(refined.image);
+      if (refined.bounds && refined.bounds.width > 0 && refined.bounds.height > 0) {
+        finalBuffer = await sharp(refinedPngBuffer)
+          .extract({
+            left: refined.bounds.left,
+            top: refined.bounds.top,
+            width: refined.bounds.width,
+            height: refined.bounds.height,
+          })
+          .png()
+          .toBuffer();
+        offsetX = refined.bounds.left;
+        offsetY = refined.bounds.top;
+      } else {
+        finalBuffer = refinedPngBuffer;
+      }
+
+      cutoutInfo = await sharp(finalBuffer).metadata();
     }
-
-    const bestDetection = selectBestGarmentDetection(
-      detections,
-      normalizedGarmentType,
-      orientedRaw.info.width,
-      orientedRaw.info.height,
-      orientedRaw.data,
-      orientedRaw.info.channels
-    );
-
-    if (!bestDetection) {
-      throw new Error('No garment bounding box found.');
-    }
-
-    const { xmin, ymin, xmax, ymax } = bestDetection.box;
-    const left = Math.max(0, Math.floor(xmin));
-    const top = Math.max(0, Math.floor(ymin));
-    const right = Math.min(image.width - 1, Math.ceil(xmax));
-    const bottom = Math.min(image.height - 1, Math.ceil(ymax));
-
-    if (right <= left || bottom <= top) {
-      throw new Error('Invalid garment detection bounds.');
-    }
-
-    const boxWidth = right - left + 1;
-    const boxHeight = bottom - top + 1;
-    const shapeProfile = getClothingShapeProfile(normalizedGarmentType);
-    const cropPadding = shapeProfile.cropPadding || { x: 0.12, top: 0.12, bottom: 0.12 };
-
-    const paddingX = Math.max(8, Math.round(boxWidth * (cropPadding.x ?? 0.12)));
-    const topPadding = Math.max(8, Math.round(boxHeight * (cropPadding.top ?? 0.12)));
-    const bottomPadding = Math.max(8, Math.round(boxHeight * (cropPadding.bottom ?? 0.12)));
-
-    const cropLeft = Math.max(0, left - paddingX);
-    const cropTop = Math.max(0, top - topPadding);
-    const cropRight = Math.min(image.width - 1, right + paddingX);
-    const cropBottom = Math.min(image.height - 1, bottom + bottomPadding);
-    const cropWidth = cropRight - cropLeft + 1;
-    const cropHeight = cropBottom - cropTop + 1;
-
-    const croppedBuffer = await sharp(orientedBuffer)
-      .extract({ left: cropLeft, top: cropTop, width: cropWidth, height: cropHeight })
-      .png()
-      .toBuffer();
-
-    const croppedImage = await rawImageFromBuffer(croppedBuffer, 'image/png');
-    const backgroundRemover = await getBackgroundRemover();
-    const cutoutImage = await backgroundRemover(croppedImage);
-    const refinedResult = refineCutoutMask(cutoutImage, normalizedGarmentType);
-    const opaqueRatio = getAlphaOpaqueRatio(refinedResult.image);
-    const borderOpaqueRatio = getAlphaBorderOpaqueRatio(refinedResult.image);
-
-    if (opaqueRatio > 0.88 || borderOpaqueRatio > 0.72) {
-      // Background remover occasionally returns near-full opacity; fall back to color-key extraction.
-      const fallbackCutout = await createColorKeyCutout(croppedBuffer);
-      return withCutoutOffset(fallbackCutout, cropLeft, cropTop);
-    }
-
-    const alphaBounds = refinedResult.bounds;
-
-    if (!alphaBounds) {
-      // Never return a raw crop when no garment mask exists.
-      const fallbackCutout = await createHeuristicGarmentCutout(croppedBuffer);
-      return withCutoutOffset(fallbackCutout, cropLeft, cropTop);
-    }
-
-    const cutoutBuffer = await sharp(Buffer.from(refinedResult.image.data), {
-      raw: {
-        width: refinedResult.image.width,
-        height: refinedResult.image.height,
-        channels: refinedResult.image.channels,
-      },
-    })
-      .extract(alphaBounds)
-      .png()
-      .toBuffer();
-
-    return {
-      pngDataUrl: `data:image/png;base64,${cutoutBuffer.toString('base64')}`,
-      cutout: {
-        width: alphaBounds.width,
-        height: alphaBounds.height,
-        offsetX: cropLeft + alphaBounds.left,
-        offsetY: cropTop + alphaBounds.top,
-      },
-    };
   } catch (error) {
-    console.warn('Model-based garment cutout failed, falling back to heuristic cutout:', error.message);
-    return createHeuristicGarmentCutout(buffer);
+    console.warn('Cutout refinement failed, using raw background-removal output:', error.message);
   }
+
+  return {
+    pngDataUrl: `data:image/png;base64,${finalBuffer.toString('base64')}`,
+    cutout: {
+      width: cutoutInfo.width || 0,
+      height: cutoutInfo.height || 0,
+      offsetX,
+      offsetY,
+    },
+  };
 }
 
 async function createColorKeyCutout(buffer) {

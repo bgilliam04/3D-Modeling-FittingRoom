@@ -9,7 +9,7 @@
     "generate:clothing-shapes:from-outlines": "node scripts/generate-clothing-shapes-from-outlines.js"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.1.0",
+    "@imgly/background-removal-node": "^1.4.5",
     "cors": "^2.8.5",
     "express": "^4.18.4",
     "image-size": "^1.0.3",
