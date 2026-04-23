@@ -69,6 +69,15 @@ let cachedClothingAnalysisKey = null;
 let cachedClothingResult = null;
 let debugPanel = null;
 let currentClothingSizeLabel = null;
+let currentSizeRepresentativeMeasurementType = null;
+let modelMeasurementCalibration = null;
+let measurementPixelMap = {};
+let sizeToMeasurementsMap = {};
+let previewRaycaster = null;
+let previewPointer = null;
+let isDraggingPreviewGarment = false;
+let previewDragPlane = null;
+let previewDragOffset = null;
 
 function getSizeGuideScaleMultiplier() {
   const numericSize = Number(currentClothingSizeValue);
@@ -77,7 +86,7 @@ function getSizeGuideScaleMultiplier() {
   }
 
   // Check if this is a length measurement (should not be doubled)
-  if (isLengthMeasurement(currentClothingSizeLabel)) {
+  if (isLengthMeasurement(currentSizeRepresentativeMeasurementType)) {
     // Length measurements are already accurate; use directly without doubling
     const referenceLengthInches = 28;
     return Math.max(0.55, Math.min(1.85, numericSize / referenceLengthInches));
@@ -92,10 +101,27 @@ function getSizeGuideScaleMultiplier() {
 
 function isLengthMeasurement(label) {
   // Check if a size label indicates a linear/length measurement rather than circumference
+  // Note: "width" is treated as a circumference measurement, not length
   if (!label) return false;
   const normalizedLabel = String(label).toUpperCase();
   const lengthKeywords = ['LENGTH', 'INSEAM', 'SHOULDER', 'SLEEVE', 'RISE', 'CHEST HEIGHT', 'HIP HEIGHT'];
+  const circumferenceKeywords = ['WIDTH', 'CHEST', 'BUST', 'WAIST', 'HIP'];
+  
+  // If it's explicitly a circumference keyword, it's not a length measurement
+  if (circumferenceKeywords.some((keyword) => normalizedLabel.includes(keyword))) {
+    return false;
+  }
+  
   return lengthKeywords.some((keyword) => normalizedLabel.includes(keyword));
+}
+
+function getCircumferenceMeasurementMultiplier(label) {
+  // Only explicit flat/half-width style measurements should be doubled.
+  // Circumference-like labels (WAIST/CHEST/HIP/BUST) are already full values.
+  if (!label) return 1;
+  const normalizedLabel = String(label).toUpperCase();
+  const flatKeywords = ['WIDTH', 'HALF', 'ACROSS'];
+  return flatKeywords.some((keyword) => normalizedLabel.includes(keyword)) ? 2 : 1;
 }
 
 function getMeasurementZoneAndType(label) {
@@ -131,12 +157,22 @@ function getMeasurementZoneAndType(label) {
   return { zone: 'full', isLength, zoneStart: 0, zoneEnd: 1 };
 }
 
-function applyMeasurementSpecificDeformation(mesh, sizeValue, label, ppi) {
-  // Apply targeted deformations: stretch/compress specific parts based on measurement type
+function applyMeasurementSpecificDeformation(mesh, sizeValue, label, pixelValue) {
+  // Apply targeted deformations using pre-computed pixel values for consistent measurement application
   if (!mesh || !sizeValue || !THREE_LIB) return;
   
   const isLength = isLengthMeasurement(label);
   const zone = getMeasurementZoneAndType(label);
+  
+  // Use the pre-computed pixel value; fallback to inch calculation if not provided
+  let targetPixels = pixelValue;
+  if (!Number.isFinite(targetPixels)) {
+    const ppi = getPixelsPerInch();
+    targetPixels = sizeValue * ppi;
+    if (!isLength) {
+      targetPixels = sizeValue * 2 * ppi;  // Circumference is one-sided, so double it
+    }
+  }
   
   mesh.traverse((child) => {
     if (!child?.isMesh || !child.geometry?.attributes?.position) return;
@@ -170,20 +206,23 @@ function applyMeasurementSpecificDeformation(mesh, sizeValue, label, ppi) {
     const midY = (bounds.minY + bounds.maxY) * 0.5;
     const midZ = (bounds.minZ + bounds.maxZ) * 0.5;
     
-    // Calculate scale factors
-    const targetSizeInUnits = sizeValue * ppi;
+    // Calculate deformation factors based on pre-computed pixel values
     let circumferenceScale = 1;
     if (!isLength) {
-      // For circumference: compare target to reference (e.g., 40 inch reference)
-      const referenceSize = 40;
-      circumferenceScale = Math.max(0.5, Math.min(2.0, targetSizeInUnits / (referenceSize * ppi)));
+      // For circumference: compare target pixels to reference (40 inch = 40 * 2 * ppi pixels)
+      const ppi = modelMeasurementCalibration?.modelUnitsPerInch || getPixelsPerInch();
+      const referencePixels = 40 * 2 * ppi;  // Full 40-inch circumference in pixels
+      circumferenceScale = Math.max(0.5, Math.min(2.0, targetPixels / referencePixels));
     }
     
-    let lengthScale = 1;
+    let lengthDelta = 0;
     if (isLength) {
-      // For length: compare target to average height
-      const referenceLength = 28;
-      lengthScale = Math.max(0.7, Math.min(1.5, targetSizeInUnits / (referenceLength * ppi)));
+      // For length, compute delta from the target pixel height
+      const baseLengthPixels = height;
+      const minLengthPixels = baseLengthPixels * 0.55;
+      const maxLengthPixels = baseLengthPixels * 1.95;
+      const clampedTargetPixels = Math.max(minLengthPixels, Math.min(maxLengthPixels, targetPixels));
+      lengthDelta = clampedTargetPixels - baseLengthPixels;
     }
     
     for (let i = 0; i < base.length; i += 3) {
@@ -205,9 +244,10 @@ function applyMeasurementSpecificDeformation(mesh, sizeValue, label, ppi) {
           source[i + 2] = midZ + zOffset * circumferenceScale;
           source[i + 1] = y; // Keep Y unchanged for circumference
         } else {
-          // Length deformation: scale Y stretch at this zone
-          const yOffset = y - midY;
-          source[i + 1] = midY + yOffset * lengthScale;
+          // Length deformation: extend from bottom, keep top anchored
+          // Pixels below the top contribute proportionally to the delta
+          const topWeight = (bounds.maxY - y) / height;
+          source[i + 1] = y - lengthDelta * Math.max(0, Math.min(1, topWeight));
           source[i] = x; // Keep X unchanged
           source[i + 2] = z; // Keep Z unchanged
         }
@@ -217,6 +257,127 @@ function applyMeasurementSpecificDeformation(mesh, sizeValue, label, ppi) {
         source[i + 1] = y;
         source[i + 2] = z;
       }
+    }
+    
+    positionAttr.needsUpdate = true;
+    child.geometry.computeVertexNormals();
+  });
+}
+
+function applyAllMeasurementDeformations(mesh, measurements) {
+  // Apply all chart measurements simultaneously to the garment mesh
+  // Each measurement affects specific zones of the garment based on its type
+  if (!mesh || !measurements || measurements.length === 0 || !THREE_LIB) return;
+  
+  mesh.traverse((child) => {
+    if (!child?.isMesh || !child.geometry?.attributes?.position) return;
+    
+    const positionAttr = child.geometry.attributes.position;
+    const source = positionAttr.array;
+    if (!source || source.length < 9) return;
+    
+    // Ensure we have base positions to work from
+    if (!child.userData.basePositionArray || child.userData.basePositionArray.length !== source.length) {
+      child.userData.basePositionArray = Float32Array.from(source);
+      const baseBounds = new THREE_LIB.Box3().setFromBufferAttribute(positionAttr);
+      child.userData.baseBounds = {
+        minX: baseBounds.min.x,
+        minY: baseBounds.min.y,
+        minZ: baseBounds.min.z,
+        maxX: baseBounds.max.x,
+        maxY: baseBounds.max.y,
+        maxZ: baseBounds.max.z,
+      };
+    }
+    
+    const base = child.userData.basePositionArray;
+    const bounds = child.userData.baseBounds;
+    if (!bounds) return;
+    
+    const height = Math.max(0.0001, bounds.maxY - bounds.minY);
+    const width = Math.max(0.0001, bounds.maxX - bounds.minX);
+    const depth = Math.max(0.0001, bounds.maxZ - bounds.minZ);
+    const midX = (bounds.minX + bounds.maxX) * 0.5;
+    const midY = (bounds.minY + bounds.maxY) * 0.5;
+    const midZ = (bounds.minZ + bounds.maxZ) * 0.5;
+    
+    // Calculate deformation factors for each measurement
+    const deformations = measurements.map((measurement) => {
+      const measurementType = measurement.measurementType || measurement.type || measurement.label;
+      const sizeLabel = measurement.sizeLabel || currentClothingSizeLabel || '';
+      const isLength = isLengthMeasurement(measurementType);
+      const zone = getMeasurementZoneAndType(measurementType);
+      const pixelValue = getPixelValueForMeasurement(measurementType, measurement.value, sizeLabel);
+      
+      let circumferenceScale = 1;
+      let lengthDelta = 0;
+      
+      if (!isLength) {
+        // pixelValue = inchValue * 2 * ppi (world units, full circumference equivalent).
+        // Target flat width in world units = pixelValue / 2.
+        // Convert to local units by dividing by current garment base scale.
+        // Then compare to the garment's own local half-width so the scale is relative
+        // to THIS garment, not a fixed adult-body reference.
+        const safeBaseScale = Math.max(0.00001, generatedGarmentBaseScale);
+        const targetLocalHalfWidth = (pixelValue / 2) / safeBaseScale;
+        const currentLocalHalfWidth = Math.max(0.00001, width / 2);
+        circumferenceScale = Math.max(0.3, Math.min(3.0, targetLocalHalfWidth / currentLocalHalfWidth));
+      } else {
+        // pixelValue = inchValue * ppi (world units).
+        // Convert to local units so the delta is in the same space as the vertex positions.
+        const safeBaseScale = Math.max(0.00001, generatedGarmentBaseScale);
+        const targetLocalHeight = pixelValue / safeBaseScale;
+        const baseLengthPixels = height;
+        const minLengthPixels = baseLengthPixels * 0.55;
+        const maxLengthPixels = baseLengthPixels * 1.95;
+        const clampedTargetPixels = Math.max(minLengthPixels, Math.min(maxLengthPixels, targetLocalHeight));
+        lengthDelta = clampedTargetPixels - baseLengthPixels;
+      }
+      
+      return {
+        isLength,
+        zone,
+        circumferenceScale,
+        lengthDelta,
+      };
+    });
+    
+    // Apply all measurements to vertices
+    for (let i = 0; i < base.length; i += 3) {
+      const x = base[i];
+      const y = base[i + 1];
+      const z = base[i + 2];
+      
+      const yNorm01 = (y - bounds.minY) / height;
+      let newX = x;
+      let newY = y;
+      let newZ = z;
+      
+      // Apply each measurement if this vertex is in its zone
+      for (let m = 0; m < measurements.length; m++) {
+        const measurement = measurements[m];
+        const deform = deformations[m];
+        const zone = deform.zone;
+        const inZone = yNorm01 >= zone.zoneStart && yNorm01 <= zone.zoneEnd;
+        
+        if (inZone) {
+          if (!deform.isLength) {
+            // Circumference deformation: scale X and Z uniformly around center
+            const xOffset = newX - midX;
+            const zOffset = newZ - midZ;
+            newX = midX + xOffset * deform.circumferenceScale;
+            newZ = midZ + zOffset * deform.circumferenceScale;
+          } else {
+            // Length deformation: extend from bottom, keep top anchored
+            const topWeight = (bounds.maxY - y) / height;
+            newY = y - deform.lengthDelta * Math.max(0, Math.min(1, topWeight));
+          }
+        }
+      }
+      
+      source[i] = newX;
+      source[i + 1] = newY;
+      source[i + 2] = newZ;
     }
     
     positionAttr.needsUpdate = true;
@@ -252,6 +413,118 @@ function getPixelsPerInch() {
   const ppi = modelHeightUnits / Math.max(1, modelHeightInches);
   
   return ppi;
+}
+
+function calibrateMeasurementsForModel() {
+  // Compute a single model-level calibration that will be used for all size-guide conversions
+  if (!THREE_LIB || !currentModel) {
+    modelMeasurementCalibration = null;
+    measurementPixelMap = {};
+    return;
+  }
+
+  const modelHeightInches = getModelHeightInches();
+  const modelUnitsPerInch = getPixelsPerInch();
+
+  modelMeasurementCalibration = {
+    modelHeightInches,
+    modelUnitsPerInch,
+    calibratedAt: new Date().toISOString(),
+  };
+
+  console.log('Measurement calibration set:', modelMeasurementCalibration);
+}
+
+function normalizeMeasurementEntry(entry) {
+  if (!entry || !Number.isFinite(Number(entry.value))) {
+    return null;
+  }
+
+  const rawSizeLabel = entry.sizeLabel || entry.size || entry.size_name || null;
+  const rawMeasurementType = entry.measurementType || entry.type || entry.measurement || null;
+  const fallbackLabel = entry.label ? String(entry.label).trim() : '';
+
+  const sizeLabel = String(rawSizeLabel || fallbackLabel || '').trim();
+  const measurementType = String(rawMeasurementType || fallbackLabel || '').trim();
+  const inchValue = Number(entry.value);
+
+  if (!sizeLabel || !measurementType) {
+    return null;
+  }
+
+  return {
+    sizeLabel,
+    measurementType,
+    value: inchValue,
+    sourceFile: entry.sourceFile || null,
+  };
+}
+
+function convertMeasurementsToPixels(sizeEntries) {
+  // Convert all size-guide measurements (in inches) to pixel values using the current model calibration
+  if (!modelMeasurementCalibration) {
+    calibrateMeasurementsForModel();
+  }
+  
+  if (!modelMeasurementCalibration) {
+    return sizeEntries; // Fallback: return unchanged if no calibration
+  }
+
+  const { modelUnitsPerInch } = modelMeasurementCalibration;
+  const newPixelMap = {};
+
+  for (const rawEntry of sizeEntries || []) {
+    const entry = normalizeMeasurementEntry(rawEntry);
+    if (!entry) {
+      continue;
+    }
+
+    const inchValue = entry.value;
+    const isLength = isLengthMeasurement(entry.measurementType);
+    let pixelValue = inchValue * modelUnitsPerInch;
+
+    // For circumference measurements, convert from one-sided to full circumference
+    if (!isLength) {
+      pixelValue = inchValue * 2 * modelUnitsPerInch;
+    }
+
+    const key = `${entry.sizeLabel}|${entry.measurementType}|${entry.value}`;
+    newPixelMap[key] = {
+      sizeLabel: entry.sizeLabel,
+      measurementType: entry.measurementType,
+      inchValue,
+      pixelValue,
+      isLength,
+    };
+  }
+
+  measurementPixelMap = newPixelMap;
+  return sizeEntries;
+}
+
+function getPixelValueForMeasurement(label, inchValue, sizeLabel = '') {
+  // Look up the pre-computed pixel value for a measurement
+  const sizeTypeKey = `${String(sizeLabel || '').trim()}|${label}|${inchValue}`;
+  if (measurementPixelMap[sizeTypeKey]) {
+    return measurementPixelMap[sizeTypeKey].pixelValue;
+  }
+
+  // Legacy fallback key support
+  const legacyKey = `${label}|${inchValue}`;
+  if (measurementPixelMap[legacyKey]) {
+    return measurementPixelMap[legacyKey].pixelValue;
+  }
+
+  // Fallback: compute on-the-fly if not in map
+  if (!modelMeasurementCalibration) {
+    return inchValue * getPixelsPerInch();
+  }
+  const { modelUnitsPerInch } = modelMeasurementCalibration;
+  const isLength = isLengthMeasurement(label);
+  if (isLength) {
+    return inchValue * modelUnitsPerInch;
+  }
+  return inchValue * getCircumferenceMeasurementMultiplier(label) * modelUnitsPerInch;
 }
 
 function applyBodyConformingDeformationToGarment(modelSize, fitProfile, sizeGuideScale) {
@@ -353,7 +626,8 @@ function ensureDebugPanel() {
   debugPanel.style.color = '#7dffa1';
   debugPanel.style.font = '12px/1.35 Consolas, Menlo, Monaco, monospace';
   debugPanel.style.whiteSpace = 'pre-wrap';
-  debugPanel.style.pointerEvents = 'none';
+  debugPanel.style.pointerEvents = 'auto';
+  debugPanel.style.overscrollBehavior = 'contain';
   debugPanel.textContent = 'Debug panel ready.';
   document.body.appendChild(debugPanel);
   return debugPanel;
@@ -377,6 +651,10 @@ function initModelViewer() {
   if (!modelContainer || !THREE_LIB) return;
   scene = new THREE_LIB.Scene();
   setPreviewBackground(false);
+  previewRaycaster = new THREE_LIB.Raycaster();
+  previewPointer = new THREE_LIB.Vector2();
+  previewDragPlane = new THREE_LIB.Plane();
+  previewDragOffset = new THREE_LIB.Vector3();
 
   const width = modelContainer.clientWidth;
   const height = Math.max(modelContainer.clientHeight, 300);
@@ -409,6 +687,102 @@ function initModelViewer() {
   controls.enableDamping = true;
   controls.target.set(0, 1, 0);
 
+  const getPreviewPointerPosition = (event) => {
+    if (!renderer || !camera || !previewPointer) {
+      return false;
+    }
+
+    const rect = renderer.domElement.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      return false;
+    }
+
+    previewPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    previewPointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    return true;
+  };
+
+  const updateGarmentDragPosition = (event) => {
+    if (!isDraggingPreviewGarment || !previewRaycaster || !previewDragPlane || !generatedGarmentMesh) {
+      return;
+    }
+
+    if (!getPreviewPointerPosition(event)) {
+      return;
+    }
+
+    previewRaycaster.setFromCamera(previewPointer, camera);
+    const hitPoint = new THREE_LIB.Vector3();
+    if (!previewRaycaster.ray.intersectPlane(previewDragPlane, hitPoint)) {
+      return;
+    }
+
+    generatedGarmentMesh.position.copy(hitPoint.sub(previewDragOffset));
+    generatedGarmentMesh.updateMatrixWorld(true);
+  };
+
+  renderer.domElement.addEventListener('pointerdown', (event) => {
+    if (!generatedGarmentMesh || !previewRaycaster || !previewDragPlane || !previewDragOffset) {
+      return;
+    }
+
+    if (!getPreviewPointerPosition(event)) {
+      return;
+    }
+
+    previewRaycaster.setFromCamera(previewPointer, camera);
+    const meshCandidates = [];
+    generatedGarmentMesh.traverse?.((child) => {
+      if (child?.isMesh) {
+        meshCandidates.push(child);
+      }
+    });
+
+    const intersections = previewRaycaster.intersectObjects(meshCandidates, false);
+    if (!intersections.length) {
+      return;
+    }
+
+    const hitPoint = intersections[0].point.clone();
+    const cameraNormal = camera.getWorldDirection(new THREE_LIB.Vector3()).normalize();
+    previewDragPlane.setFromNormalAndCoplanarPoint(cameraNormal, hitPoint);
+    previewDragOffset.copy(hitPoint).sub(generatedGarmentMesh.position);
+    isDraggingPreviewGarment = true;
+    controls.enabled = false;
+    renderer.domElement.style.cursor = 'grabbing';
+    event.preventDefault();
+  });
+
+  renderer.domElement.addEventListener('pointermove', (event) => {
+    updateGarmentDragPosition(event);
+  });
+
+  window.addEventListener('pointerup', () => {
+    if (!isDraggingPreviewGarment) {
+      return;
+    }
+
+    isDraggingPreviewGarment = false;
+    if (controls) {
+      controls.enabled = true;
+    }
+    if (renderer?.domElement) {
+      renderer.domElement.style.cursor = 'grab';
+    }
+  });
+
+  renderer.domElement.addEventListener('pointerleave', () => {
+    if (!isDraggingPreviewGarment) {
+      renderer.domElement.style.cursor = 'grab';
+    }
+  });
+
+  renderer.domElement.addEventListener('pointerenter', () => {
+    if (!isDraggingPreviewGarment) {
+      renderer.domElement.style.cursor = 'grab';
+    }
+  });
+
   window.addEventListener('resize', () => {
     if (!modelContainer) return;
     const newWidth = modelContainer.clientWidth;
@@ -424,11 +798,6 @@ function initModelViewer() {
 function animateModel() {
   requestAnimationFrame(animateModel);
   if (controls) controls.update();
-  if (currentModel) {
-    currentModel.rotation.y += 0.003;
-  } else if (generatedGarmentMesh) {
-    generatedGarmentMesh.rotation.y += 0.002;
-  }
   if (renderer && scene && camera) {
     renderer.render(scene, camera);
   }
@@ -470,14 +839,20 @@ function alignGarmentToCurrentModel() {
   const fitProfile = getGarmentFitProfile(garmentType);
   const modelSize = modelBox.getSize(new THREE_LIB.Vector3());
   const modelCenter = modelBox.getCenter(new THREE_LIB.Vector3());
-  const sizeGuideScale = getSizeGuideScaleMultiplier();
-  const selectedSizeInches = getSelectedSizeInches();
+  const selectedMeasurements = currentClothingSizeLabel
+    ? (sizeToMeasurementsMap[String(currentClothingSizeLabel).trim()] || [])
+    : [];
+  const hasProvidedMeasurements = selectedMeasurements.length > 0;
 
   generatedGarmentMesh.position.set(0, 0, 0);
   generatedGarmentMesh.scale.setScalar(Math.max(0.0001, generatedGarmentBaseScale));
   generatedGarmentMesh.updateMatrixWorld(true);
 
-  applyBodyConformingDeformationToGarment(modelSize, fitProfile, sizeGuideScale);
+  // Only conform garment shape to body when no chart measurements are available.
+  // If measurements exist, they are the single source of dimensional truth.
+  if (!hasProvidedMeasurements) {
+    applyBodyConformingDeformationToGarment(modelSize, fitProfile, 1);
+  }
 
   const garmentBoxBefore = new THREE_LIB.Box3().setFromObject(generatedGarmentMesh);
   if (garmentBoxBefore.isEmpty()) {
@@ -491,20 +866,38 @@ function alignGarmentToCurrentModel() {
   const targetWidthFromModel = modelSize.x * fitProfile.widthRatio;
   const targetHeightFromModel = modelSize.y * fitProfile.heightRatio;
 
-  let scaleFactor = Math.max(0.2, Math.min(6, Math.min(targetWidthFromModel / safeGarmentWidth, targetHeightFromModel / safeGarmentHeight)));
+  // Fallback: fit garment to model proportions when no measurements available
+  const bodyFitScale = Math.max(0.2, Math.min(6, Math.min(targetWidthFromModel / safeGarmentWidth, targetHeightFromModel / safeGarmentHeight)));
 
-  // Keep garment sizing accurate to size-guide measurements when available.
-  // Size-guide values are one-sided (flat) widths in inches.
-  if (selectedSizeInches !== null) {
-    const ppi = getPixelsPerInch();
-    const targetWidthFromSizeGuide = selectedSizeInches * ppi;
-    scaleFactor = Math.max(0.2, Math.min(6, targetWidthFromSizeGuide / safeGarmentWidth));
-    
-    // Apply measurement-specific deformation (length vs circumference)
-    applyMeasurementSpecificDeformation(generatedGarmentMesh, selectedSizeInches, currentClothingSizeLabel, ppi);
+  // Start from model-fit baseline for both axes, then override only the axes
+  // that have explicit measurements in the selected size.
+  let xzScaleFactor = bodyFitScale;
+  let yScaleFactor = bodyFitScale;
+  let hasWidthMeasurement = false;
+  let hasLengthMeasurement = false;
+  let widthMeasurementType = null;
+  let widthMeasurementMultiplier = 1;
+  if (hasProvidedMeasurements) {
+    const ppi = modelMeasurementCalibration?.modelUnitsPerInch || getPixelsPerInch();
+    for (const m of selectedMeasurements) {
+      const type = String(m.measurementType || '').trim();
+      if (isLengthMeasurement(type) && !hasLengthMeasurement) {
+        hasLengthMeasurement = true;
+        yScaleFactor = (m.value * ppi) / Math.max(0.0001, garmentSizeBefore.y);
+      } else if (!isLengthMeasurement(type) && !hasWidthMeasurement) {
+        hasWidthMeasurement = true;
+        widthMeasurementType = type;
+        widthMeasurementMultiplier = getCircumferenceMeasurementMultiplier(type);
+        xzScaleFactor = (m.value * widthMeasurementMultiplier * ppi) / Math.max(0.0001, garmentSizeBefore.x);
+      }
+    }
   }
 
-  generatedGarmentMesh.scale.setScalar(generatedGarmentBaseScale * scaleFactor);
+  generatedGarmentMesh.scale.set(
+    generatedGarmentBaseScale * xzScaleFactor,
+    generatedGarmentBaseScale * yScaleFactor,
+    generatedGarmentBaseScale * xzScaleFactor
+  );
   generatedGarmentMesh.updateMatrixWorld(true);
 
   const garmentBoxAfter = new THREE_LIB.Box3().setFromObject(generatedGarmentMesh);
@@ -525,11 +918,16 @@ function alignGarmentToCurrentModel() {
 
   updateDebugPanel('Garment aligned to avatar model.', {
     garmentType,
-    scaleFactor: Number(scaleFactor.toFixed(4)),
-    sizeGuideScale: Number(sizeGuideScale.toFixed(4)),
-    selectedSize: selectedSizeInches,
+    xzScaleFactor: Number(xzScaleFactor.toFixed(4)),
+    yScaleFactor: Number(yScaleFactor.toFixed(4)),
+    hasWidthMeasurement,
+    hasLengthMeasurement,
+    hasProvidedMeasurements,
+    widthMeasurementType,
+    widthMeasurementMultiplier,
+    selectedSize: getSelectedSizeInches(),
     modelHeightInches: Number(getModelHeightInches().toFixed(2)),
-
+    ppi: Number((modelMeasurementCalibration?.modelUnitsPerInch || getPixelsPerInch()).toFixed(6)),
     targetWidth: Number(targetWidthFromModel.toFixed(4)),
     targetHeight: Number(targetHeightFromModel.toFixed(4)),
   });
@@ -815,9 +1213,48 @@ function resizeClothingImage(sizeValue) {
 
   if (!clothingOverlay || clothingOverlay.hidden) return;
 
-  const newWidth = calculateImageWidth(sizeValue);
-  clothingOverlay.style.width = newWidth + 'px';
-  clothingOverlay.style.height = 'auto';
+  const isLengthSize = isLengthMeasurement(currentSizeRepresentativeMeasurementType);
+  if (isLengthSize) {
+    // Use pre-calibrated pixel value for consistent measurement display
+    let targetHeight = Math.max(80, Math.round(getPixelValueForMeasurement(
+      currentSizeRepresentativeMeasurementType,
+      sizeValue,
+      currentClothingSizeLabel,
+    )));
+    
+    // Fallback: calculate from ppi if not in calibration map
+    if (!Number.isFinite(targetHeight) || targetHeight < 80) {
+      const pixelsPerInch = getPixelsPerInch();
+      targetHeight = Math.max(80, Math.round(sizeValue * pixelsPerInch));
+    }
+    
+    const cutoutWidth = currentGarmentCutout?.width || clothingOverlay?.naturalWidth || 1;
+    const cutoutHeight = currentGarmentCutout?.height || clothingOverlay?.naturalHeight || 1;
+    const aspectRatio = cutoutWidth / Math.max(1, cutoutHeight);
+    const targetWidth = Math.max(50, Math.round(targetHeight * aspectRatio));
+
+    const previousRect = clothingOverlay.getBoundingClientRect();
+    const topBefore = previousRect.top;
+
+    clothingOverlay.style.width = targetWidth + 'px';
+    clothingOverlay.style.height = targetHeight + 'px';
+    clothingOverlay.style.transform = 'translate(-50%, -50%)';
+
+    const nextRect = clothingOverlay.getBoundingClientRect();
+    const topShift = nextRect.top - topBefore;
+    if (Math.abs(topShift) > 0.5) {
+      const currentTop = parseFloat(clothingOverlay.style.top || '50%');
+      if (Number.isFinite(currentTop)) {
+        clothingOverlay.style.top = (currentTop - topShift) + 'px';
+        clothingOverlay.style.transform = 'translate(0, 0)';
+      }
+    }
+  } else {
+    const newWidth = calculateImageWidth(sizeValue);
+    clothingOverlay.style.width = newWidth + 'px';
+    clothingOverlay.style.height = 'auto';
+  }
+
   clothingOverlay.style.maxWidth = 'none';
   clothingOverlay.style.maxHeight = 'none';
 }
@@ -827,21 +1264,79 @@ function applySelectedClothingSize() {
   resizeClothingImage(currentClothingSizeValue);
 }
 
+function chooseRepresentativeMeasurement(measurements) {
+  const list = Array.isArray(measurements) ? measurements.filter(Boolean) : [];
+  if (list.length === 0) {
+    return null;
+  }
+
+  // Anchor representative size to model-height-driven behavior by preferring length metrics.
+  const preferredLength = list.find((entry) => {
+    const type = String(entry.measurementType || '').toUpperCase();
+    return type.includes('BODY LENGTH') || type.includes('LENGTH') || type.includes('INSEAM') || type.includes('SLEEVE');
+  });
+  if (preferredLength) {
+    return preferredLength;
+  }
+
+  const prioritized = list.find((entry) => {
+    const type = String(entry.measurementType || '').toUpperCase();
+    return type.includes('CHEST') || type.includes('BUST') || type.includes('WAIST') || type.includes('HIP') || type.includes('WIDTH');
+  });
+  if (prioritized) {
+    return prioritized;
+  }
+
+  const anyCircumference = list.find((entry) => !isLengthMeasurement(entry.measurementType));
+  if (anyCircumference) {
+    return anyCircumference;
+  }
+
+  return list[0];
+}
+
 function createSizeButton(size) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'size-button';
   button.textContent = size.label;
   button.dataset.sizeValue = size.value;
+
+  const representativeType = String(size.measurementType || '').trim();
+  const representativeValue = Number(size.value);
+  const inchValue = Number(size.value);
+  const pixelValue = Number.isFinite(inchValue) && representativeType
+    ? getPixelValueForMeasurement(representativeType, representativeValue, size.label)
+    : null;
+  button.dataset.pixelValue = pixelValue || '';
+  
   button.addEventListener('click', () => {
     document.querySelectorAll('.size-button').forEach((btn) => btn.classList.remove('active'));
     button.classList.add('active');
     currentClothingSizeValue = size.value;
     currentClothingSizeLabel = size.label;
-    analyzeStatus.textContent = `Selected ${size.label} — ${size.value}`;
-    if (generatedGarmentMesh && currentModel) {
-      alignGarmentToCurrentModel();
+    currentSizeRepresentativeMeasurementType = representativeType || null;
+    
+    // Get all measurements for this size
+    const sizeLabel = String(size.label).trim();
+    const measurementsForSize = sizeToMeasurementsMap[sizeLabel] || [];
+    
+    if (measurementsForSize.length > 0) {
+      analyzeStatus.textContent = `Selected ${size.label} with ${measurementsForSize.length} measurements`;
+    } else {
+      analyzeStatus.textContent = `Selected ${size.label} — ${size.value}"${pixelValue ? ` (${Math.round(pixelValue)}px)` : ''}`;
     }
+
+    if (generatedGarmentMesh) {
+      if (currentModel) {
+        alignGarmentToCurrentModel();
+      } else if (measurementsForSize.length > 0) {
+        // Fallback when no avatar model is loaded: still apply selected size measurements.
+        applyAllMeasurementDeformations(generatedGarmentMesh, measurementsForSize);
+      }
+    }
+
+    applySelectedClothingSize();
   });
   return button;
 }
@@ -924,12 +1419,79 @@ function renderSizeButtons(sizes) {
   if (!sizeButtons) return;
   sizeButtons.innerHTML = '';
 
-  const uniqueSizes = sortSizes(dedupeSizes(sizes));
+  const normalizedMeasurements = (sizes || [])
+    .map((entry) => normalizeMeasurementEntry(entry))
+    .filter(Boolean);
 
-  if (uniqueSizes.length === 0) {
+  if (normalizedMeasurements.length === 0) {
     sizeButtons.textContent = 'No sizes detected. Try uploading a clearer, high-quality screenshot of the size guide. Ensure the text is crisp and the table is well-lit.';
     return;
   }
+
+  // Calibrate and convert all measurements to pixel values using the model's current setup
+  convertMeasurementsToPixels(normalizedMeasurements);
+
+  // Build a map of size to ALL its measurements from the chart
+  // Group by size label so all measurements for a size apply together
+  sizeToMeasurementsMap = {};
+  normalizedMeasurements.forEach((measurement) => {
+    const sizeLabel = String(measurement.sizeLabel).trim();
+    if (!sizeToMeasurementsMap[sizeLabel]) {
+      sizeToMeasurementsMap[sizeLabel] = [];
+    }
+    sizeToMeasurementsMap[sizeLabel].push({
+      sizeLabel,
+      measurementType: String(measurement.measurementType).trim(),
+      value: Number(measurement.value),
+    });
+  });
+
+  const uniqueSizes = sortSizes(
+    Object.keys(sizeToMeasurementsMap).map((sizeLabel) => {
+      const representative = chooseRepresentativeMeasurement(sizeToMeasurementsMap[sizeLabel]);
+      return {
+        label: sizeLabel,
+        value: representative?.value ?? 0,
+        measurementType: representative?.measurementType || '',
+      };
+    })
+  );
+
+  // Build debug output grouped per size, listing all measurements for each size
+  const measurementGroupsBySize = {};
+  normalizedMeasurements.forEach((measurement) => {
+    const sizeLabel = String(measurement.sizeLabel).trim();
+    const measurementType = String(measurement.measurementType).trim();
+    const inchValue = Number(measurement.value);
+    const isLength = isLengthMeasurement(measurementType);
+    const pixelValue = getPixelValueForMeasurement(measurementType, inchValue, sizeLabel);
+
+    if (!measurementGroupsBySize[sizeLabel]) {
+      measurementGroupsBySize[sizeLabel] = [];
+    }
+
+    measurementGroupsBySize[sizeLabel].push({
+      measurementType,
+      inches: inchValue,
+      type: isLength ? 'Length' : 'Circumference',
+      pixels: Math.round(pixelValue * 100) / 100,
+    });
+  });
+
+  const measurementDetails = Object.keys(measurementGroupsBySize)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+    .map((sizeLabel) => ({
+      size: sizeLabel,
+      measurementCount: measurementGroupsBySize[sizeLabel].length,
+      measurements: measurementGroupsBySize[sizeLabel],
+    }));
+  
+  updateDebugPanel('Size measurements detected and calibrated.', {
+    totalMeasurements: normalizedMeasurements.length,
+    totalSizes: measurementDetails.length,
+    calibration: modelMeasurementCalibration,
+    measurementsBySize: measurementDetails,
+  });
 
   uniqueSizes.forEach((size) => {
     sizeButtons.appendChild(createSizeButton(size));
@@ -984,6 +1546,7 @@ function loadScanFile(file) {
         }
       });
       scene.add(currentModel);
+      calibrateMeasurementsForModel();
       alignGarmentToCurrentModel();
       setPreviewBackground(true);
       console.log('3D model loaded successfully');
