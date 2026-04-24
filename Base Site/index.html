@@ -6,43 +6,59 @@
   <title>fitting room.</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
-<select id="themeSwitcher">
-  <option value="theme-1">Soft Fresh</option>
-  <option value="theme-2">Dark Forest</option>
-  <option value="theme-3">Editorial Warm</option>
-  <option value="theme-4">Modern Olive</option>
-  <option value="theme-5">Luxury Dark</option>
-</select>
 <body class="theme-1">
   <header class="site-header">
-    <div class="brand">fitting room.</div>
+    <div class="brand">
+      <img src="images/it (6).png" alt="it fits logo" class="logo" />
+    </div>
+
     <nav class="site-nav" id="siteNav">
       <a href="#home">Home</a>
       <a href="#analyze">Analyze</a>
       <a href="#collection">Collection</a>
       <a href="#contact">Contact</a>
     </nav>
+
     <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation">Menu</button>
+
+    <select id="themeSwitcher">
+      <option value="theme-1">Soft Fresh</option>
+      <option value="theme-2">Dark Forest</option>
+      <option value="theme-3">Editorial Warm</option>
+      <option value="theme-4">Modern Olive</option>
+      <option value="theme-5">Luxury Dark</option>
+    </select>
   </header>
 
   <main>
     <section class="hero" id="home">
       <div class="hero-copy">
         <p class="eyebrow">Virtual fitting made easy</p>
-        <h1>Try on outfits in 3D from anywhere.</h1>
-        <p>Try Out Our 3D Fitting Room!</p>
+        <h1>See how clothes fit before you buy.</h1>
+        <p class="hero-subtitle">
+          Upload a 3D body scan, add a garment image, and compare sizing with a visual fit preview.
+        </p>
         <div class="hero-actions">
-          <a class="btn primary" href="#workflow">Start Fitting</a>
+          <a class="btn primary" href="#analyze">Start Fitting</a>
           <a class="btn secondary" href="#collection">View Collection</a>
         </div>
       </div>
+
       <div class="hero-visual">
         <div class="visual-card">
           <div class="visual-label">3D Preview</div>
+
           <div id="modelContainer" class="visual-placeholder">
-            <div id="previewHint" class="preview-hint"></div>
+            <div id="previewHint" class="preview-hint">
+              <div>
+                <strong>Your fit preview will appear here</strong>
+                <span>Upload a 3D scan and clothing image to begin.</span>
+              </div>
+            </div>
+
             <img id="clothingOverlay" class="clothing-overlay" alt="Clothing overlay" hidden />
           </div>
+
           <div class="size-guide-panel">
             <h4>Detected Sizes</h4>
             <div id="sizeButtons" class="size-buttons"></div>
@@ -51,12 +67,13 @@
       </div>
     </section>
 
-
     <section class="upload-section" id="analyze">
       <div class="section-header">
-        <p class="eyebrow">Asset upload</p>
-        <h2>Upload your 3D scan, clothing image, and size guide</h2>
+        <p class="eyebrow">Fit setup</p>
+        <h2>Build your virtual try-on</h2>
+        <p>Start with your scan, add a clothing image, then upload the brand’s size guide.</p>
       </div>
+
       <div class="upload-grid">
         <article class="upload-card">
           <label class="upload-label">
@@ -65,12 +82,14 @@
             <span class="upload-help">Allowed file types: .glb and .gltf.</span>
           </label>
         </article>
+
         <article class="upload-card">
           <label class="upload-label">
             Clothing Image
             <input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" />
             <span class="upload-help">Allowed file types: .png, .jpg, .jpeg.</span>
           </label>
+
           <label class="upload-label" style="margin-top: 1rem;">
             Garment Type
             <select id="garmentTypeSelect">
@@ -88,6 +107,7 @@
             <span class="upload-help">Pick the garment type to guide cutout detection.</span>
           </label>
         </article>
+
         <article class="upload-card">
           <label class="upload-label">
             Size Guide Image
@@ -96,21 +116,26 @@
           </label>
         </article>
       </div>
+
       <div class="upload-actions">
         <button type="button" class="btn primary" id="analyzeButton">Analyze Clothing + Size Guide</button>
         <p class="form-status" id="analyzeStatus"></p>
       </div>
+
       <div class="analysis-results" id="analysisResults"></div>
     </section>
 
     <section class="collection" id="collection">
       <div class="section-header">
         <p class="eyebrow">Our collection</p>
-        <h2>A Basic Collection of Test Models</h2>
+        <h2>A basic collection of test models</h2>
       </div>
+
       <div class="collection-grid">
         <article class="collection-item">
-          <div class="item-image"><img src="images/basic circle skirt model.png" alt="Circle Skirt" /></div>
+          <div class="item-image">
+            <img src="images/basic circle skirt model.png" alt="Circle Skirt" />
+          </div>
           <h3>Circle Skirt</h3>
         </article>
       </div>
@@ -121,19 +146,23 @@
         <p class="eyebrow">Get started</p>
         <h2>Reach out with feedback</h2>
       </div>
+
       <form class="contact-form" id="contactForm">
         <label>
           Name
           <input type="text" name="name" placeholder="Your name" required />
         </label>
+
         <label>
           Email
           <input type="email" name="email" placeholder="your@email.com" required />
         </label>
+
         <label>
           Message
           <textarea name="message" rows="4" placeholder="Give us feedback or contact us here!"></textarea>
         </label>
+
         <button type="submit" class="btn primary">Send Request</button>
         <p class="form-status" id="formStatus"></p>
       </form>
