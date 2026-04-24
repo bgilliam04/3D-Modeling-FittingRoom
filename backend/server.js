@@ -11,6 +11,8 @@ const { removeBackground } = require('@imgly/background-removal-node');
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const PORT = process.env.PORT || 4000;
+const XCLOTH_INFER_URL = process.env.XCLOTH_INFER_URL || 'http://127.0.0.1:8008/infer';
+const XCLOTH_TIMEOUT_MS = Number.parseInt(process.env.XCLOTH_TIMEOUT_MS || '25000', 10);
 
 app.use(cors());
 app.use(express.json());
@@ -37,7 +39,7 @@ function buildAnalysis(file) {
 
 function dedupeSizes(sizes) {
   const uniqueSizes = [];
-  const seenLabels = new Set();
+  const seenKeys = new Set();
 
   for (const size of sizes || []) {
     if (!size || typeof size.value === 'undefined' || !size.label) {
@@ -45,11 +47,13 @@ function dedupeSizes(sizes) {
     }
 
     const labelKey = normalizeSizeLabel(size.label);
-    if (!labelKey || seenLabels.has(labelKey)) {
+    const measurementKey = size.measurementType ? String(size.measurementType).trim().toUpperCase() : '';
+    const dedupeKey = measurementKey ? `${labelKey}|${measurementKey}` : labelKey;
+    if (!labelKey || seenKeys.has(dedupeKey)) {
       continue;
     }
 
-    seenLabels.add(labelKey);
+    seenKeys.add(dedupeKey);
     uniqueSizes.push(size);
   }
 
@@ -133,6 +137,50 @@ function inferNumericSizeSequence(columns) {
   }
 
   return { start, step };
+}
+
+function inferSuffixedNumericSizeSequence(columns, suffix) {
+  const suffixPattern = new RegExp(`^(\\d+)${suffix}$`);
+  const numericColumns = (columns || [])
+    .map((column, index) => {
+      const match = normalizeSizeLabel(column?.label).match(suffixPattern);
+      return {
+        index,
+        value: match ? Number.parseInt(match[1], 10) : null,
+      };
+    })
+    .filter((column) => Number.isFinite(column.value));
+
+  if (numericColumns.length < 3) {
+    return null;
+  }
+
+  const uniqueValues = [...new Set(numericColumns.map((column) => column.value))].sort((a, b) => a - b);
+  if (uniqueValues.length < 3) {
+    return null;
+  }
+
+  let step = 0;
+  for (let index = 1; index < uniqueValues.length; index += 1) {
+    const difference = uniqueValues[index] - uniqueValues[index - 1];
+    if (difference <= 0) {
+      continue;
+    }
+    step = step === 0 ? difference : greatestCommonDivisor(step, difference);
+  }
+
+  if (!Number.isFinite(step) || step < 1) {
+    return null;
+  }
+
+  const firstNumericColumn = numericColumns.slice().sort((a, b) => a.index - b.index)[0];
+  const start = firstNumericColumn.value - firstNumericColumn.index * step;
+
+  if (!Number.isFinite(start)) {
+    return null;
+  }
+
+  return { start, step, suffix };
 }
 
 function sortSizes(sizes) {
@@ -303,18 +351,83 @@ function normalizeGarmentType(garmentType) {
   return Object.prototype.hasOwnProperty.call(GARMENT_LABELS, normalized) ? normalized : 'shirt';
 }
 
-function isSkinTonePixel(red, green, blue) {
+function isSkinTonePixel(red, green, blue, minVotes = 2) {
+  const toHsv = (r, g, b) => {
+    const rn = r / 255;
+    const gn = g / 255;
+    const bn = b / 255;
+    const max = Math.max(rn, gn, bn);
+    const min = Math.min(rn, gn, bn);
+    const delta = max - min;
+
+    let hue = 0;
+    if (delta !== 0) {
+      if (max === rn) {
+        hue = ((gn - bn) / delta) % 6;
+      } else if (max === gn) {
+        hue = (bn - rn) / delta + 2;
+      } else {
+        hue = (rn - gn) / delta + 4;
+      }
+      hue *= 60;
+      if (hue < 0) hue += 360;
+    }
+
+    const saturation = max === 0 ? 0 : delta / max;
+    return { hue, saturation, value: max };
+  };
+
+  const toYCbCr = (r, g, b) => {
+    const y = 0.299 * r + 0.587 * g + 0.114 * b;
+    const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+    const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+    return { y, cb, cr };
+  };
+
   const maxChannel = Math.max(red, green, blue);
   const minChannel = Math.min(red, green, blue);
   const chroma = maxChannel - minChannel;
+  const sum = red + green + blue;
 
-  if (red < 85 || green < 35 || blue < 15) return false;
-  if (chroma < 10) return false;
-  if (Math.abs(red - green) < 12) return false;
+  if (sum <= 0 || chroma < 8) return false;
+
+  const { hue, saturation, value } = toHsv(red, green, blue);
+  const { y, cb, cr } = toYCbCr(red, green, blue);
+
+  const normalizedR = red / sum;
+  const normalizedG = green / sum;
+
+  // Broad normalized-rgb gate to include diverse tones while excluding obvious non-skin hues.
+  const normalizedRule =
+    normalizedR >= 0.28 && normalizedR <= 0.58 &&
+    normalizedG >= 0.18 && normalizedG <= 0.42 &&
+    normalizedR > normalizedG;
+
+  // Wide YCbCr region that captures light to dark skin tones better than fixed RGB limits.
+  const ycbcrRule =
+    y >= 20 && y <= 245 &&
+    cb >= 65 && cb <= 148 &&
+    cr >= 115 && cr <= 188;
+
+  // HSV safety net for warm hues at different brightness/saturation levels.
+  const warmHue = (hue >= 0 && hue <= 58) || (hue >= 330 && hue <= 360);
+  const hsvRule = warmHue && saturation >= 0.08 && saturation <= 0.78 && value >= 0.08 && value <= 0.98;
+
+  let votes = 0;
+  if (normalizedRule) votes += 1;
+  if (ycbcrRule) votes += 1;
+  if (hsvRule) votes += 1;
+
+  if (votes >= minVotes) {
+    return true;
+  }
+
+  // Fallback legacy rule only applies in strict mode.
+  if (minVotes < 2) return false;
+  if (red < 65 || green < 25 || blue < 10) return false;
+  if (Math.abs(red - green) < 10) return false;
   if (red <= green || red <= blue) return false;
-
-  const saturation = maxChannel === 0 ? 0 : chroma / maxChannel;
-  return saturation > 0.08;
+  return (maxChannel === 0 ? 0 : chroma / maxChannel) > 0.06;
 }
 
 function estimateSkinRatioInBox(rawData, width, height, channels, box) {
@@ -620,8 +733,8 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
   const data = new Uint8ClampedArray(source.length);
   data.set(source);
 
-  // Harden the matte so low-confidence background haze becomes transparent.
-  const alphaThreshold = 96;
+  // Keep low-confidence interior pixels for darker fabrics while removing haze.
+  const alphaThreshold = 40;
   for (let i = 3; i < data.length; i += channels) {
     if (data[i] < alphaThreshold) {
       data[i] = 0;
@@ -709,23 +822,52 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
     return keepMask;
   };
 
-  const keepMask = selectMainComponent(mask, centerX, centerY);
+  const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
+  const preserveBottomEdge = lowerBodyGarments.has(garmentType);
+  const skipLowerBand = preserveBottomEdge;
 
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      if (keepMask[index]) continue;
-      const offset = index * channels;
-      data[offset + 3] = 0;
+  const countOpaquePixels = () => {
+    let count = 0;
+    for (let i = 3; i < data.length; i += channels) {
+      if (data[i] > 0) {
+        count += 1;
+      }
     }
-  }
+    return count;
+  };
 
-  // Remove attached wearer skin clusters (hands/arms/neck/legs) from all garment masks.
-  {
+  let previousOpaquePixels = -1;
+  const maxCleanupPasses = 5;
+
+  for (let cleanupPass = 0; cleanupPass < maxCleanupPasses; cleanupPass += 1) {
+    const passMask = new Uint8Array(width * height);
+    let passOpaquePixels = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] > 0) {
+          passMask[index] = 1;
+          passOpaquePixels += 1;
+        }
+      }
+    }
+
+    if (passOpaquePixels === 0) {
+      break;
+    }
+
+    const keepMask = selectMainComponent(passMask, centerX, centerY);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (keepMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+
     const skinMask = new Uint8Array(width * height);
-    const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
-    const skipLowerBand = lowerBodyGarments.has(garmentType);
-
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
         const index = y * width + x;
@@ -733,9 +875,8 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
 
         const offset = index * channels;
         if (data[offset + 3] === 0) continue;
-
-        // For lower-body garments, preserve a small bottom band to reduce hem clipping.
-        if (skipLowerBand && y > Math.round(height * 0.9)) continue;
+        const bottomProtectionStart = skipLowerBand ? 0.96 : 1;
+        if (skipLowerBand && y > Math.round(height * bottomProtectionStart)) continue;
 
         if (isSkinTonePixel(data[offset], data[offset + 1], data[offset + 2])) {
           skinMask[index] = 1;
@@ -743,8 +884,7 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
       }
     }
 
-    // Expand the mask so connected skin-adjacent edges are removed too.
-    const expansionPasses = 2;
+    const expansionPasses = 5;
     for (let pass = 0; pass < expansionPasses; pass += 1) {
       const expanded = new Uint8Array(width * height);
 
@@ -758,6 +898,10 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
           if (x < width - 1) expanded[index + 1] = 1;
           if (y > 0) expanded[index - width] = 1;
           if (y < height - 1) expanded[index + width] = 1;
+          if (x > 0 && y > 0) expanded[index - width - 1] = 1;
+          if (x < width - 1 && y > 0) expanded[index - width + 1] = 1;
+          if (x > 0 && y < height - 1) expanded[index + width - 1] = 1;
+          if (x < width - 1 && y < height - 1) expanded[index + width + 1] = 1;
         }
       }
 
@@ -772,96 +916,303 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
         data[offset + 3] = 0;
       }
     }
+
+    // Edge-adjacent loose propagation: pixels that touch confirmed-skin-removed areas
+    // get a single-vote check so gradients and transition pixels are fully erased.
+    const edgeSkinMask = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] === 0) continue;
+        if (skipLowerBand && y > Math.round(height * 0.96)) continue;
+
+        const adjacentToSkin =
+          (y > 0 && skinMask[index - width]) ||
+          (y < height - 1 && skinMask[index + width]) ||
+          (x > 0 && skinMask[index - 1]) ||
+          (x < width - 1 && skinMask[index + 1]) ||
+          (x > 0 && y > 0 && skinMask[index - width - 1]) ||
+          (x < width - 1 && y > 0 && skinMask[index - width + 1]) ||
+          (x > 0 && y < height - 1 && skinMask[index + width - 1]) ||
+          (x < width - 1 && y < height - 1 && skinMask[index + width + 1]);
+
+        if (!adjacentToSkin) continue;
+
+        if (isSkinTonePixel(data[offset], data[offset + 1], data[offset + 2], 1)) {
+          edgeSkinMask[index] = 1;
+        }
+      }
+    }
+    for (let ep = 0; ep < 2; ep += 1) {
+      const edgeExpanded = new Uint8Array(width * height);
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const index = y * width + x;
+          if (!edgeSkinMask[index]) continue;
+          edgeExpanded[index] = 1;
+          if (x > 0) edgeExpanded[index - 1] = 1;
+          if (x < width - 1) edgeExpanded[index + 1] = 1;
+          if (y > 0) edgeExpanded[index - width] = 1;
+          if (y < height - 1) edgeExpanded[index + width] = 1;
+        }
+      }
+      edgeSkinMask.set(edgeExpanded);
+    }
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (!edgeSkinMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+
+    const secondPassAlphaThreshold = Math.min(120, 64 + cleanupPass * 6);
+    const secondSeedMask = new Uint8Array(width * height);
+    const secondCandidateMask = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] > 0) {
+          secondCandidateMask[index] = 1;
+          if (data[offset + 3] >= secondPassAlphaThreshold) {
+            secondSeedMask[index] = 1;
+          }
+        }
+      }
+    }
+
+    const secondKeepSeeds = selectMainComponent(secondSeedMask, centerX, centerY);
+    const secondKeepMask = new Uint8Array(width * height);
+    const secondQueue = [];
+    let secondQueueHead = 0;
+
+    const enqueueSecondKeep = (x, y) => {
+      if (x < 0 || y < 0 || x >= width || y >= height) return;
+      const index = y * width + x;
+      if (!secondCandidateMask[index] || secondKeepMask[index]) return;
+      secondKeepMask[index] = 1;
+      secondQueue.push(index);
+    };
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (!secondKeepSeeds[index]) continue;
+        enqueueSecondKeep(x, y);
+      }
+    }
+
+    while (secondQueueHead < secondQueue.length) {
+      const current = secondQueue[secondQueueHead++];
+      const x = current % width;
+      const y = Math.floor(current / width);
+
+      enqueueSecondKeep(x + 1, y);
+      enqueueSecondKeep(x - 1, y);
+      enqueueSecondKeep(x, y + 1);
+      enqueueSecondKeep(x, y - 1);
+    }
+
+    // If no strong seeds are present (common on very dark garments), keep the main
+    // component from all nonzero-alpha pixels instead of erasing to an outline.
+    if (secondQueue.length === 0) {
+      const fallbackKeepMask = selectMainComponent(secondCandidateMask, centerX, centerY);
+      secondKeepMask.set(fallbackKeepMask);
+    }
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (secondKeepMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+
+    const borderConnected = new Uint8Array(width * height);
+    const queue = [];
+    let queueHead = 0;
+
+    const enqueueBorderConnected = (x, y) => {
+      if (x < 0 || y < 0 || x >= width || y >= height) return;
+      const index = y * width + x;
+      if (borderConnected[index]) return;
+      const offset = index * channels;
+      if (data[offset + 3] === 0) return;
+
+      borderConnected[index] = 1;
+      queue.push(index);
+    };
+
+    for (let x = 0; x < width; x += 1) {
+      enqueueBorderConnected(x, 0);
+      if (!preserveBottomEdge) {
+        enqueueBorderConnected(x, height - 1);
+      }
+    }
+    for (let y = 0; y < height; y += 1) {
+      enqueueBorderConnected(0, y);
+      enqueueBorderConnected(width - 1, y);
+    }
+
+    while (queueHead < queue.length) {
+      const current = queue[queueHead++];
+      const x = current % width;
+      const y = Math.floor(current / width);
+
+      enqueueBorderConnected(x + 1, y);
+      enqueueBorderConnected(x - 1, y);
+      enqueueBorderConnected(x, y + 1);
+      enqueueBorderConnected(x, y - 1);
+    }
+
+    let opaqueBeforeBorderClean = 0;
+    let borderConnectedCount = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] > 0) {
+          opaqueBeforeBorderClean += 1;
+          if (borderConnected[index]) {
+            borderConnectedCount += 1;
+          }
+        }
+      }
+    }
+
+    // If most of the foreground touches borders, this is likely the garment itself.
+    // In that case, skip border purging to avoid chopping sleeves/hems.
+    const borderConnectedRatio = opaqueBeforeBorderClean > 0
+      ? borderConnectedCount / opaqueBeforeBorderClean
+      : 0;
+    const shouldApplyBorderClean = borderConnectedRatio <= 0.55;
+
+    const borderCleanMask = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const offset = index * channels;
+        if (data[offset + 3] === 0 || (shouldApplyBorderClean && borderConnected[index])) {
+          data[offset + 3] = 0;
+          continue;
+        }
+        borderCleanMask[index] = 1;
+      }
+    }
+
+    const finalKeepMask = selectMainComponent(borderCleanMask, centerX, centerY);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (finalKeepMask[index]) continue;
+        const offset = index * channels;
+        data[offset + 3] = 0;
+      }
+    }
+
+    const opaquePixels = countOpaquePixels();
+    if (opaquePixels === 0 || opaquePixels === previousOpaquePixels) {
+      break;
+    }
+    previousOpaquePixels = opaquePixels;
   }
 
-  // Second pass: trim weak alpha remnants then keep the strongest remaining component again.
-  const secondPassAlphaThreshold = 144;
-  const secondMask = new Uint8Array(width * height);
+  const finalMask = new Uint8Array(width * height);
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
       const offset = index * channels;
-
-      if (!keepMask[index] || data[offset + 3] < secondPassAlphaThreshold) {
-        data[offset + 3] = 0;
-        continue;
+      if (data[offset + 3] > 0) {
+        finalMask[index] = 1;
       }
-
-      secondMask[index] = 1;
     }
   }
 
-  const secondKeepMask = selectMainComponent(secondMask, centerX, centerY);
+  const finalMainMask = selectMainComponent(finalMask, centerX, centerY);
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
-      if (secondKeepMask[index]) continue;
+      if (finalMainMask[index]) continue;
       const offset = index * channels;
       data[offset + 3] = 0;
     }
   }
 
-  // Garment-only hardening: remove remaining border-connected foreground.
-  // For lower-body garments, keep bottom-connected pixels to avoid clipping skirt hems.
-  const lowerBodyGarments = new Set(['skirt', 'pants', 'shorts']);
-  const preserveBottomEdge = lowerBodyGarments.has(garmentType);
-  const borderConnected = new Uint8Array(width * height);
-  const queue = [];
-  let queueHead = 0;
-
-  const enqueueBorderConnected = (x, y) => {
-    if (x < 0 || y < 0 || x >= width || y >= height) return;
-    const index = y * width + x;
-    if (borderConnected[index]) return;
-    const offset = index * channels;
-    if (data[offset + 3] === 0) return;
-
-    borderConnected[index] = 1;
-    queue.push(index);
-  };
-
-  for (let x = 0; x < width; x += 1) {
-    enqueueBorderConnected(x, 0);
-    if (!preserveBottomEdge) {
-      enqueueBorderConnected(x, height - 1);
-    }
-  }
-  for (let y = 0; y < height; y += 1) {
-    enqueueBorderConnected(0, y);
-    enqueueBorderConnected(width - 1, y);
-  }
-
-  while (queueHead < queue.length) {
-    const current = queue[queueHead++];
-    const x = current % width;
-    const y = Math.floor(current / width);
-
-    enqueueBorderConnected(x + 1, y);
-    enqueueBorderConnected(x - 1, y);
-    enqueueBorderConnected(x, y + 1);
-    enqueueBorderConnected(x, y - 1);
-  }
-
-  const borderCleanMask = new Uint8Array(width * height);
+  // Remove residual body regions that survive matte cleanup: we remove only
+  // skin-dominant components that are mostly in upper regions.
+  const remainingMask = new Uint8Array(width * height);
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
       const offset = index * channels;
-      if (data[offset + 3] === 0 || borderConnected[index]) {
-        data[offset + 3] = 0;
-        continue;
+      if (data[offset + 3] > 0) {
+        remainingMask[index] = 1;
       }
-      borderCleanMask[index] = 1;
     }
   }
 
-  const finalKeepMask = selectMainComponent(borderCleanMask, centerX, centerY);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      if (finalKeepMask[index]) continue;
-      const offset = index * channels;
-      data[offset + 3] = 0;
+  const visitedResidual = new Uint8Array(width * height);
+  const queueResidual = [];
+  let queueResidualHead = 0;
+  const upperRegionMaxY = Math.round(height * 0.8);
+
+  for (let start = 0; start < remainingMask.length; start += 1) {
+    if (!remainingMask[start] || visitedResidual[start]) continue;
+
+    visitedResidual[start] = 1;
+    queueResidual.length = 0;
+    queueResidualHead = 0;
+    queueResidual.push(start);
+
+    const componentPixels = [];
+    let skinPixels = 0;
+    let minY = height;
+    let maxY = -1;
+
+    while (queueResidualHead < queueResidual.length) {
+      const current = queueResidual[queueResidualHead++];
+      const x = current % width;
+      const y = Math.floor(current / width);
+      const offset = current * channels;
+
+      componentPixels.push(current);
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+
+      if (isSkinTonePixel(data[offset], data[offset + 1], data[offset + 2], 1)) {
+        skinPixels += 1;
+      }
+
+      const neighbors = [
+        [x + 1, y],
+        [x - 1, y],
+        [x, y + 1],
+        [x, y - 1],
+      ];
+
+      for (const [nx, ny] of neighbors) {
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        const nIndex = ny * width + nx;
+        if (!remainingMask[nIndex] || visitedResidual[nIndex]) continue;
+        visitedResidual[nIndex] = 1;
+        queueResidual.push(nIndex);
+      }
+    }
+
+    const area = componentPixels.length;
+    if (area === 0) continue;
+    const skinRatio = skinPixels / area;
+    const mostlyUpperRegion = maxY <= upperRegionMaxY;
+    const smallToMedium = area <= Math.round(width * height * 0.35);
+
+    if (mostlyUpperRegion && smallToMedium && skinRatio >= 0.28) {
+      for (const pixelIndex of componentPixels) {
+        data[pixelIndex * channels + 3] = 0;
+      }
     }
   }
 
@@ -878,7 +1229,7 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
   const orientedPngBlob = new Blob([orientedBuffer], { type: 'image/png' });
 
   const outputBlob = await removeBackground(orientedPngBlob, {
-    model: 'small',
+    model: 'medium',
     output: {
       quality: 0.8,
       format: 'image/png',
@@ -900,17 +1251,30 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
     if (refined && refined.image) {
       const refinedPngBuffer = await rawImageToPngBuffer(refined.image);
       if (refined.bounds && refined.bounds.width > 0 && refined.bounds.height > 0) {
+        const cropProfile = getClothingShapeProfile(normalizedGarmentType);
+        const cropPadding = cropProfile?.cropPadding || { x: 0.12, top: 0.14, bottom: 0.18 };
+        const padX = Math.max(2, Math.round(refined.bounds.width * (cropPadding.x || 0.12)));
+        const padTop = Math.max(2, Math.round(refined.bounds.height * (cropPadding.top || 0.14)));
+        const padBottom = Math.max(2, Math.round(refined.bounds.height * (cropPadding.bottom || 0.18)));
+
+        const safeLeft = Math.max(0, refined.bounds.left - padX);
+        const safeTop = Math.max(0, refined.bounds.top - padTop);
+        const safeRight = Math.min(cutoutRawImage.width - 1, refined.bounds.left + refined.bounds.width - 1 + padX);
+        const safeBottom = Math.min(cutoutRawImage.height - 1, refined.bounds.top + refined.bounds.height - 1 + padBottom);
+        const safeWidth = Math.max(1, safeRight - safeLeft + 1);
+        const safeHeight = Math.max(1, safeBottom - safeTop + 1);
+
         finalBuffer = await sharp(refinedPngBuffer)
           .extract({
-            left: refined.bounds.left,
-            top: refined.bounds.top,
-            width: refined.bounds.width,
-            height: refined.bounds.height,
+            left: safeLeft,
+            top: safeTop,
+            width: safeWidth,
+            height: safeHeight,
           })
           .png()
           .toBuffer();
-        offsetX = refined.bounds.left;
-        offsetY = refined.bounds.top;
+        offsetX = safeLeft;
+        offsetY = safeTop;
       } else {
         finalBuffer = refinedPngBuffer;
       }
@@ -930,6 +1294,294 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
       offsetY,
     },
   };
+}
+
+function isValidTriMeshModel(model) {
+  if (!model || typeof model !== 'object') return false;
+  if (!Array.isArray(model.positions) || model.positions.length < 9 || model.positions.length % 3 !== 0) return false;
+  if (!Array.isArray(model.indices) || model.indices.length < 3 || model.indices.length % 3 !== 0) return false;
+  if (!Array.isArray(model.uvs) || model.uvs.length < 6 || model.uvs.length % 2 !== 0) return false;
+  return true;
+}
+
+function normalizeServiceGarmentModel(model, fallbackTextureDataUrl = null) {
+  if (!model || typeof model !== 'object') return null;
+
+  if (model.format === 'tri-mesh' && isValidTriMeshModel(model)) {
+    return {
+      framework: model.framework || 'xcloth',
+      format: 'tri-mesh',
+      positions: model.positions,
+      uvs: model.uvs,
+      indices: model.indices,
+      textureDataUrl: model.textureDataUrl || fallbackTextureDataUrl || null,
+      resolution: model.resolution || null,
+    };
+  }
+
+  if (typeof model.glbBase64 === 'string' && model.glbBase64.length > 0) {
+    return {
+      framework: model.framework || 'xcloth',
+      format: 'glb-base64',
+      glbDataUrl: `data:model/gltf-binary;base64,${model.glbBase64}`,
+      textureDataUrl: fallbackTextureDataUrl || null,
+    };
+  }
+
+  return null;
+}
+
+async function inferGarment3DWithXClothService(inputBuffer, garmentType, mimeType, cutoutDataUrl = null) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(5000, XCLOTH_TIMEOUT_MS));
+
+  try {
+    const form = new FormData();
+    form.append('image', new Blob([inputBuffer], { type: mimeType || 'image/png' }), 'garment.png');
+    form.append('garmentType', normalizeGarmentType(garmentType || 'shirt'));
+    if (cutoutDataUrl) {
+      form.append('cutoutDataUrl', cutoutDataUrl);
+    }
+
+    const response = await fetch(XCLOTH_INFER_URL, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const details = await response.text().catch(() => 'Unknown xCloth service error');
+      throw new Error(`xCloth service returned HTTP ${response.status}: ${details.slice(0, 300)}`);
+    }
+
+    const payload = await response.json();
+    const normalized = normalizeServiceGarmentModel(payload?.garmentModel || payload?.model || payload, cutoutDataUrl);
+
+    if (!normalized) {
+      throw new Error('xCloth service response did not include a valid garment model payload.');
+    }
+
+    return normalized;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt', mimeType = '') {
+  const cutoutResult = await createGarmentCutout(buffer, garmentType, mimeType);
+  const cutoutDataUrl = cutoutResult?.pngDataUrl || null;
+
+  if (!cutoutDataUrl || !cutoutDataUrl.startsWith('data:image/png;base64,')) {
+    return {
+      ...cutoutResult,
+      garmentModel: null,
+    };
+  }
+
+  const cutoutBuffer = Buffer.from(cutoutDataUrl.split(',')[1], 'base64');
+  const { data, info } = await sharp(cutoutBuffer)
+    .resize({ width: 96, height: 96, fit: 'inside', withoutEnlargement: true })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const width = info.width || 0;
+  const height = info.height || 0;
+  const channels = info.channels || 4;
+  const pixelCount = width * height;
+
+  if (pixelCount <= 0) {
+    return {
+      ...cutoutResult,
+      garmentModel: null,
+    };
+  }
+
+  const mask = new Uint8Array(pixelCount);
+  const distance = new Float32Array(pixelCount);
+  const queue = new Int32Array(pixelCount);
+  let queueStart = 0;
+  let queueEnd = 0;
+  let foregroundCount = 0;
+
+  for (let index = 0; index < pixelCount; index += 1) {
+    const alpha = data[index * channels + 3];
+    if (alpha > 24) {
+      mask[index] = 1;
+      distance[index] = Number.POSITIVE_INFINITY;
+      foregroundCount += 1;
+    } else {
+      distance[index] = 0;
+      queue[queueEnd++] = index;
+    }
+  }
+
+  if (foregroundCount < 24) {
+    return {
+      ...cutoutResult,
+      garmentModel: null,
+    };
+  }
+
+  // Multi-source distance transform from background to approximate layered depth.
+  while (queueStart < queueEnd) {
+    const current = queue[queueStart++];
+    const cx = current % width;
+    const cy = Math.floor(current / width);
+    const nextDistance = distance[current] + 1;
+
+    if (cx > 0) {
+      const left = current - 1;
+      if (nextDistance < distance[left]) {
+        distance[left] = nextDistance;
+        queue[queueEnd++] = left;
+      }
+    }
+    if (cx < width - 1) {
+      const right = current + 1;
+      if (nextDistance < distance[right]) {
+        distance[right] = nextDistance;
+        queue[queueEnd++] = right;
+      }
+    }
+    if (cy > 0) {
+      const up = current - width;
+      if (nextDistance < distance[up]) {
+        distance[up] = nextDistance;
+        queue[queueEnd++] = up;
+      }
+    }
+    if (cy < height - 1) {
+      const down = current + width;
+      if (nextDistance < distance[down]) {
+        distance[down] = nextDistance;
+        queue[queueEnd++] = down;
+      }
+    }
+  }
+
+  let maxDistance = 1;
+  for (let index = 0; index < pixelCount; index += 1) {
+    if (!mask[index]) continue;
+    if (Number.isFinite(distance[index]) && distance[index] > maxDistance) {
+      maxDistance = distance[index];
+    }
+  }
+
+  const frontVertexMap = new Int32Array(pixelCount).fill(-1);
+  const backVertexMap = new Int32Array(pixelCount).fill(-1);
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+
+  const aspect = width / Math.max(1, height);
+  const scaleY = 1.35;
+  const scaleX = scaleY * aspect;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (!mask[index]) continue;
+
+      const offset = index * channels;
+      const red = data[offset];
+      const green = data[offset + 1];
+      const blue = data[offset + 2];
+      const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+
+      const distanceNorm = Math.min(1, (distance[index] || 0) / Math.max(1, maxDistance));
+      const wrinkle = (0.5 - luminance) * 0.02;
+      const frontZ = 0.018 + distanceNorm * 0.08 + wrinkle;
+      const backZ = -0.018 - distanceNorm * 0.05 + wrinkle * 0.35;
+
+      const xNorm = (x / Math.max(1, width - 1) - 0.5) * 2;
+      const yNorm = (0.5 - y / Math.max(1, height - 1)) * 2;
+      const px = xNorm * scaleX;
+      const py = yNorm * scaleY + 1.1;
+
+      const frontIndex = positions.length / 3;
+      positions.push(px, py, frontZ);
+      uvs.push(x / Math.max(1, width - 1), 1 - y / Math.max(1, height - 1));
+      frontVertexMap[index] = frontIndex;
+
+      const backIndex = positions.length / 3;
+      positions.push(px, py, backZ);
+      uvs.push(x / Math.max(1, width - 1), 1 - y / Math.max(1, height - 1));
+      backVertexMap[index] = backIndex;
+    }
+  }
+
+  for (let y = 0; y < height - 1; y += 1) {
+    for (let x = 0; x < width - 1; x += 1) {
+      const i00 = y * width + x;
+      const i10 = i00 + 1;
+      const i01 = i00 + width;
+      const i11 = i01 + 1;
+
+      const f00 = frontVertexMap[i00];
+      const f10 = frontVertexMap[i10];
+      const f01 = frontVertexMap[i01];
+      const f11 = frontVertexMap[i11];
+
+      if (f00 >= 0 && f10 >= 0 && f01 >= 0) {
+        indices.push(f00, f10, f01);
+      }
+      if (f10 >= 0 && f11 >= 0 && f01 >= 0) {
+        indices.push(f10, f11, f01);
+      }
+
+      const b00 = backVertexMap[i00];
+      const b10 = backVertexMap[i10];
+      const b01 = backVertexMap[i01];
+      const b11 = backVertexMap[i11];
+
+      if (b00 >= 0 && b01 >= 0 && b10 >= 0) {
+        indices.push(b00, b01, b10);
+      }
+      if (b10 >= 0 && b01 >= 0 && b11 >= 0) {
+        indices.push(b10, b01, b11);
+      }
+    }
+  }
+
+  const garmentModel = {
+    framework: 'xcloth-fallback',
+    format: 'tri-mesh',
+    positions,
+    uvs,
+    indices,
+    textureDataUrl: cutoutDataUrl,
+    resolution: {
+      width,
+      height,
+    },
+  };
+
+  return {
+    ...cutoutResult,
+    garmentModel,
+  };
+}
+
+async function createGarment3DModel(buffer, garmentType = 'shirt', mimeType = '') {
+  const cutoutResult = await createGarmentCutout(buffer, garmentType, mimeType);
+  const cutoutDataUrl = cutoutResult?.pngDataUrl || null;
+
+  if (cutoutDataUrl && cutoutDataUrl.startsWith('data:image/png;base64,')) {
+    try {
+      const cutoutBuffer = Buffer.from(cutoutDataUrl.split(',')[1], 'base64');
+      const serviceModel = await inferGarment3DWithXClothService(cutoutBuffer, garmentType, 'image/png', cutoutDataUrl);
+      return {
+        ...cutoutResult,
+        garmentModel: serviceModel,
+      };
+    } catch (error) {
+      console.warn('xCloth inference service unavailable, falling back to local approximation:', error.message);
+    }
+  }
+
+  const fallbackResult = await createApproxGarment3DModelFromCutout(buffer, garmentType, mimeType);
+  return fallbackResult;
 }
 
 async function createColorKeyCutout(buffer) {
@@ -1628,6 +2280,12 @@ function parseNumericValueFromToken(token) {
     .replace(/,/g, '.')
     .trim();
 
+  const percentHalfMatch = normalized.match(/^(\d+(?:\.\d+)?)%$/);
+  if (percentHalfMatch) {
+    const parsedHalf = Number.parseFloat(percentHalfMatch[1]);
+    return Number.isFinite(parsedHalf) ? parsedHalf + 0.5 : null;
+  }
+
   const normalizeCompactedMeasurement = (rawValue, normalizedToken) => {
     if (!Number.isFinite(rawValue)) {
       return rawValue;
@@ -1770,6 +2428,18 @@ function repairSizeHeaderColumns(columns) {
     }
   }
 
+  const toddlerSequence = inferSuffixedNumericSizeSequence(repaired, 'T');
+  if (toddlerSequence) {
+    repaired.forEach((column, index) => {
+      const expectedValue = toddlerSequence.start + index * toddlerSequence.step;
+      const currentMatch = normalizeSizeLabel(column.label).match(/^(\d+)T$/);
+
+      if (!currentMatch || Number.parseInt(currentMatch[1], 10) !== expectedValue) {
+        column.label = `${expectedValue}T`;
+      }
+    });
+  }
+
   const numericSequence = inferNumericSizeSequence(repaired);
   if (numericSequence) {
     repaired.forEach((column, index) => {
@@ -1782,7 +2452,7 @@ function repairSizeHeaderColumns(columns) {
     });
   }
 
-  return repaired;
+  return repaired.filter((column) => isSizeLabelToken(column.label));
 }
 
 function extractSizesFromTableWords(ocrData) {
@@ -1814,27 +2484,263 @@ function extractSizesFromTableWords(ocrData) {
     return [];
   }
 
+  const missingValuePattern = /^(?:N\s*\/\s*A|NA|N\.A\.?|NONE|--|—|–|-)$/i;
+  const isMissingValueToken = (text) => missingValuePattern.test(String(text || '').trim());
+  const getColumnDistanceLimit = (columns, index) => {
+    const currentX = columns[index]?.x;
+    if (typeof currentX !== 'number') {
+      return 24;
+    }
+
+    const prevX = index > 0 ? columns[index - 1]?.x : null;
+    const nextX = index < columns.length - 1 ? columns[index + 1]?.x : null;
+    const neighborGaps = [
+      typeof prevX === 'number' ? Math.abs(currentX - prevX) : Infinity,
+      typeof nextX === 'number' ? Math.abs(nextX - currentX) : Infinity,
+    ].filter(Number.isFinite);
+
+    if (neighborGaps.length === 0) {
+      return 24;
+    }
+
+    return Math.max(18, Math.min(...neighborGaps) * 0.45);
+  };
+
+  const assignRowCellsToColumns = (row, columns) => {
+    const orderedColumns = [...(columns || [])]
+      .map((column, index) => ({ ...column, index }))
+      .filter((column) => typeof column.x === 'number')
+      .sort((first, second) => first.x - second.x);
+
+    const sortedRowTokens = [...row.tokens].sort((first, second) => first.cx - second.cx);
+    const numericCells = [];
+    for (let index = 0; index < sortedRowTokens.length; index += 1) {
+      const token = sortedRowTokens[index];
+      let value = parseNumericValueFromToken(token.text);
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+
+      const nextToken = sortedRowTokens[index + 1];
+      if (nextToken && String(nextToken.text || '').trim() === '%') {
+        value += 0.5;
+        index += 1;
+      }
+
+      numericCells.push({ x: token.cx, value });
+    }
+
+    for (let index = 1; index < numericCells.length; index += 1) {
+      while (numericCells[index].value + 4 < numericCells[index - 1].value) {
+        numericCells[index].value += 10;
+      }
+    }
+
+    const missingCells = row.tokens
+      .filter((token) => parseNumericValueFromToken(token.text) === null && isMissingValueToken(token.text))
+      .map((token) => ({ x: token.cx, text: token.text }));
+
+    if (numericCells.length === 0 || orderedColumns.length === 0) {
+      return new Map();
+    }
+
+    const assignments = new Map();
+    for (const numericCell of numericCells) {
+      let bestColumn = null;
+      let bestDistance = Infinity;
+
+      for (let index = 0; index < orderedColumns.length; index += 1) {
+        const column = orderedColumns[index];
+        const distance = Math.abs(numericCell.x - column.x);
+        const distanceLimit = getColumnDistanceLimit(orderedColumns, index);
+        const blockedByMissingValue = missingCells.some((cell) => Math.abs(cell.x - column.x) <= distanceLimit);
+
+        if (blockedByMissingValue || distance > distanceLimit || distance >= bestDistance) {
+          continue;
+        }
+
+        bestDistance = distance;
+        bestColumn = column;
+      }
+
+      if (!bestColumn) {
+        continue;
+      }
+
+      const existing = assignments.get(bestColumn.index);
+      if (!existing || bestDistance < existing.distance) {
+        assignments.set(bestColumn.index, {
+          value: numericCell.value,
+          distance: bestDistance,
+        });
+      }
+    }
+
+    return assignments;
+  };
+
   let headerRowIndex = -1;
   let headerLabels = [];
 
-  for (let index = 0; index < rows.length; index += 1) {
+  const headerMeasurementKeywords = ['CHEST', 'BUST', 'WAIST', 'BODY', 'WIDTH', 'LENGTH', 'HIP', 'INSEAM', 'SLEEVE', 'SHOULDER', 'NECK', 'RISE'];
+  let bestHeaderCandidate = null;
+
+  for (let index = 0; index < Math.min(rows.length, 8); index += 1) {
     const row = rows[index];
     const sizeTokens = row.tokens.filter((token) => isSizeLabelToken(token.text));
     const hasSizeWord = row.tokens.some((token) => token.text === 'SIZE');
 
-    if (sizeTokens.length >= 3 || (hasSizeWord && sizeTokens.length >= 1)) {
-      headerRowIndex = index;
-      const firstContentIndex = row.tokens.findIndex((token) => {
-        if (isSizeLabelToken(token.text) || parseNumericValueFromToken(token.text) !== null) {
-          return true;
-        }
-
-        return String(token.text || '').trim().length === 1;
-      });
-
-      headerLabels = firstContentIndex === -1 ? sizeTokens : row.tokens.slice(firstContentIndex);
-      break;
+    if (sizeTokens.length < 2 && !(hasSizeWord && sizeTokens.length >= 1)) {
+      continue;
     }
+
+    const rowText = row.tokens.map((token) => token.text).join(' ');
+    const hasMeasurementKeyword = headerMeasurementKeywords.some((keyword) => rowText.includes(keyword));
+    const nonSizeNonNumericCount = row.tokens.filter((token) => {
+      if (isSizeLabelToken(token.text)) {
+        return false;
+      }
+
+      return parseNumericValueFromToken(token.text) === null;
+    }).length;
+
+    const firstContentIndex = row.tokens.findIndex((token) => {
+      if (isSizeLabelToken(token.text) || parseNumericValueFromToken(token.text) !== null) {
+        return true;
+      }
+
+      return String(token.text || '').trim().length === 1;
+    });
+    const candidateLabels = firstContentIndex === -1 ? sizeTokens : row.tokens.slice(firstContentIndex);
+
+    const score =
+      sizeTokens.length * 4
+      + (hasSizeWord ? 5 : 0)
+      - (hasMeasurementKeyword ? 12 : 0)
+      - Math.max(0, nonSizeNonNumericCount - 2)
+      - index * 0.25;
+
+    if (!bestHeaderCandidate || score > bestHeaderCandidate.score) {
+      bestHeaderCandidate = {
+        index,
+        labels: candidateLabels,
+        score,
+      };
+    }
+  }
+
+  if (bestHeaderCandidate) {
+    headerRowIndex = bestHeaderCandidate.index;
+    headerLabels = bestHeaderCandidate.labels;
+  }
+
+  // --- Column-oriented detection ---
+  // In a column-oriented table the first column contains size labels (one per row)
+  // and the header row (if any) contains measurement type names.
+  // Heuristic: if we found no row-oriented header, OR if the first non-header column
+  // has size label tokens in most data rows, treat as column-oriented.
+  const detectColumnOriented = () => {
+    // Gather text of first-column tokens across all rows (excluding any detected header)
+    const startCheck = headerRowIndex >= 0 ? headerRowIndex + 1 : 0;
+    const checkRows = rows.slice(startCheck, startCheck + 12);
+    if (checkRows.length < 2) return false;
+    const firstColXs = checkRows.map((r) => r.tokens[0]?.cx ?? 0);
+    const avgFirstColX = firstColXs.reduce((a, b) => a + b, 0) / firstColXs.length;
+    const sizeRowCount = checkRows.filter((r) => {
+      const firstToken = r.tokens.find((t) => Math.abs(t.cx - avgFirstColX) < 30);
+      return firstToken && isSizeLabelToken(firstToken.text);
+    }).length;
+    return sizeRowCount >= Math.max(2, Math.floor(checkRows.length * 0.5));
+  };
+
+  const isColumnOriented = headerRowIndex === -1 || detectColumnOriented();
+
+  if (isColumnOriented) {
+    // Find the measurement-type header row and keep all plausible measurement columns,
+    // not only a narrow keyword list (guides vary: sleeve, shoulder, neck, rise, etc.).
+    const measurementKeywordsCol = ['CHEST', 'BUST', 'WAIST', 'BODY', 'WIDTH', 'LENGTH', 'HIP', 'INSEAM', 'SLEEVE', 'SHOULDER', 'NECK', 'RISE'];
+    const headerStopWords = new Set(['SIZE', 'US', 'UK', 'EU', 'CM', 'MM', 'IN', 'INCH', 'INCHES']);
+    const isMeasurementHeaderToken = (text) => {
+      const token = String(text || '').trim();
+      if (!token || token.length < 2) {
+        return false;
+      }
+
+      if (isSizeLabelToken(token)) {
+        return false;
+      }
+
+      if (parseNumericValueFromToken(token) !== null) {
+        return false;
+      }
+
+      if (headerStopWords.has(token)) {
+        return false;
+      }
+
+      return true;
+    };
+
+    let colHeaderRowIndex = -1;
+    let colMeasurementHeaders = [];
+    let bestHeaderScore = -1;
+
+    for (let i = 0; i < Math.min(rows.length, 8); i++) {
+      const row = rows[i];
+      const candidateHeaders = row.tokens
+        .filter((t) => isMeasurementHeaderToken(t.text))
+        .map((t) => ({ text: t.text, x: t.cx }));
+
+      if (candidateHeaders.length < 2) {
+        continue;
+      }
+
+      const rowText = row.tokens.map((t) => t.text).join(' ');
+      const kwCount = measurementKeywordsCol.filter((kw) => rowText.includes(kw)).length;
+      const score = candidateHeaders.length + kwCount * 2;
+
+      if (score > bestHeaderScore) {
+        bestHeaderScore = score;
+        colHeaderRowIndex = i;
+        colMeasurementHeaders = candidateHeaders;
+      }
+    }
+
+    if (colHeaderRowIndex === -1 || colMeasurementHeaders.length === 0) {
+      // No measurement header found – cannot parse column-oriented table
+      return [];
+    }
+
+    const dataRows = rows.slice(colHeaderRowIndex + 1);
+    const allMappedColRows = [];
+
+    for (const row of dataRows) {
+      if (row.tokens.length < 2) continue;
+
+      // Determine the size label: first token in the row that is a size label token
+      const sizeLabelToken = row.tokens.find((t) => isSizeLabelToken(t.text));
+      if (!sizeLabelToken) continue;
+      const sizeLabel = normalizeSizeLabel(sizeLabelToken.text);
+      if (!sizeLabel) continue;
+
+      const assignedValues = assignRowCellsToColumns(row, colMeasurementHeaders);
+      if (assignedValues.size === 0) continue;
+
+      for (let headerIndex = 0; headerIndex < colMeasurementHeaders.length; headerIndex += 1) {
+        const header = colMeasurementHeaders[headerIndex];
+        const assignedValue = assignedValues.get(headerIndex);
+        if (assignedValue) {
+          allMappedColRows.push({
+            label: sizeLabel,
+            sizeLabel,
+            measurementType: header.text.slice(0, 64).trim(),
+            value: assignedValue.value,
+          });
+        }
+      }
+    }
+
+    return allMappedColRows;
   }
 
   if (headerRowIndex === -1 || headerLabels.length === 0) {
@@ -1853,81 +2759,91 @@ function extractSizesFromTableWords(ocrData) {
   for (let index = headerRowIndex + 1; index < Math.min(rows.length, headerRowIndex + 3); index += 1) {
     const row = rows[index];
     const sizeTokens = row.tokens.filter((token) => isSizeLabelToken(token.text));
-    if (sizeTokens.length >= Math.max(2, Math.floor(headerColumns.length * 0.6))) {
+    const rowText = row.tokens.map((token) => token.text).join(' ');
+    const numericValueTokens = row.tokens.filter((token) => parseNumericValueFromToken(token.text) !== null).length;
+    const hasMeasurementKeyword = ['CHEST', 'BUST', 'WAIST', 'BODY', 'WIDTH', 'LENGTH', 'HIP', 'INSEAM', 'SLEEVE', 'SHOULDER', 'NECK', 'RISE']
+      .some((keyword) => rowText.includes(keyword));
+
+    if (
+      !hasMeasurementKeyword
+      && numericValueTokens <= 1
+      && sizeTokens.length >= Math.max(2, Math.floor(headerColumns.length * 0.6))
+    ) {
       depictionRowCount += 1;
     } else {
       break;
     }
   }
 
-  let measurementRow = null;
   const measurementKeywords = ['CHEST', 'BUST', 'WAIST', 'BODY', 'WIDTH', 'LENGTH', 'HIP', 'INSEAM'];
   const measurementSearchStart = headerRowIndex + depictionRowCount;
 
+  const headerMinX = headerColumns.reduce((min, column) => Math.min(min, column.x), Number.POSITIVE_INFINITY);
+  const minExpectedNumericCells = Math.max(2, Math.floor(headerColumns.length * 0.5));
+
+  const inferMeasurementTypeFromRow = (row) => {
+    const nonNumericLeftTokens = row.tokens
+      .filter((token) => parseNumericValueFromToken(token.text) === null)
+      .filter((token) => token.cx <= headerMinX + 8)
+      .map((token) => token.text)
+      .filter(Boolean);
+
+    let measurementType = nonNumericLeftTokens.join(' ').replace(/\s+/g, ' ').trim();
+    if (!measurementType) {
+      const rowText = row.tokens.map((token) => token.text).join(' ');
+      const keyword = measurementKeywords.find((candidate) => rowText.includes(candidate));
+      measurementType = keyword || 'MEASUREMENT';
+    }
+
+    return measurementType.slice(0, 64).trim() || 'MEASUREMENT';
+  };
+
+  const mapSizeValuesForRow = (row, measurementType) => {
+    const assignedValues = assignRowCellsToColumns(row, headerColumns);
+
+    if (assignedValues.size < minExpectedNumericCells) {
+      return [];
+    }
+
+    const mapped = [];
+    for (let columnIndex = 0; columnIndex < headerColumns.length; columnIndex += 1) {
+      const column = headerColumns[columnIndex];
+      const sizeLabel = normalizeSizeLabel(column.label);
+      const assignedValue = assignedValues.get(columnIndex);
+      if (!sizeLabel || !assignedValue) {
+        continue;
+      }
+
+      mapped.push({
+        label: sizeLabel,
+        sizeLabel,
+        measurementType,
+        value: assignedValue.value,
+      });
+    }
+
+    return mapped;
+  };
+
+  const allMappedRows = [];
   for (let index = measurementSearchStart; index < rows.length; index += 1) {
     const row = rows[index];
     const rowText = row.tokens.map((token) => token.text).join(' ');
     const hasKeyword = measurementKeywords.some((keyword) => rowText.includes(keyword));
     const numericTokenCount = row.tokens.filter((token) => parseNumericValueFromToken(token.text) !== null).length;
 
-    if (hasKeyword && numericTokenCount >= 2) {
-      measurementRow = row;
-      break;
+    if (!hasKeyword && numericTokenCount < minExpectedNumericCells) {
+      continue;
+    }
+
+    const measurementType = inferMeasurementTypeFromRow(row);
+    const mapped = mapSizeValuesForRow(row, measurementType);
+    if (mapped.length > 0) {
+      allMappedRows.push(...mapped);
     }
   }
 
-  if (!measurementRow) {
-    for (let index = measurementSearchStart; index < rows.length; index += 1) {
-      const row = rows[index];
-      const numericTokenCount = row.tokens.filter((token) => parseNumericValueFromToken(token.text) !== null).length;
-      if (numericTokenCount >= 2) {
-        measurementRow = row;
-        break;
-      }
-    }
-  }
-
-  if (!measurementRow) {
-    return [];
-  }
-
-  const numericCells = measurementRow.tokens
-    .map((token) => ({ x: token.cx, value: parseNumericValueFromToken(token.text) }))
-    .filter((token) => Number.isFinite(token.value));
-
-  if (numericCells.length === 0) {
-    return [];
-  }
-
-  const mapLabelsToValues = (labelTokens) => {
-    const mapped = [];
-
-    for (const labelToken of labelTokens) {
-      const label = normalizeSizeLabel(labelToken.text || labelToken.label);
-      const x = typeof labelToken.x === 'number' ? labelToken.x : labelToken.cx;
-      if (!label || typeof x !== 'number') {
-        continue;
-      }
-
-      let nearest = null;
-      let nearestDistance = Infinity;
-      for (const numericCell of numericCells) {
-        const distance = Math.abs(numericCell.x - x);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          nearest = numericCell;
-        }
-      }
-
-      if (nearest) {
-        mapped.push({ label, value: nearest.value });
-      }
-    }
-
-    return mapped;
-  };
-
-  return mapLabelsToValues(headerColumns);
+  return allMappedRows;
 }
 
 function parseSizeGuideText(text) {
@@ -1958,10 +2874,13 @@ function parseSizeGuideText(text) {
       .replace(/X\s*S\b/g, 'XS')
       .replace(/(\d+)\s*T\b/g, '$1T');
 
-    labelPattern.lastIndex = 0;
-    let labelMatch;
+    const labelMatches = [...normalizedLine.matchAll(labelPattern)];
+    if (labelMatches.length === 0) {
+      continue;
+    }
 
-    while ((labelMatch = labelPattern.exec(normalizedLine)) !== null) {
+    for (let labelIndex = 0; labelIndex < labelMatches.length; labelIndex += 1) {
+      const labelMatch = labelMatches[labelIndex];
       const label = normalizeSizeLabel(labelMatch[1]);
       if (seenLabels.has(label)) {
         continue;
@@ -1969,29 +2888,32 @@ function parseSizeGuideText(text) {
 
       const labelStart = labelMatch.index;
       const labelEnd = labelStart + labelMatch[0].length;
+      const nextLabelStart = labelIndex < labelMatches.length - 1 ? labelMatches[labelIndex + 1].index : normalizedLine.length;
+      const segmentAfterLabel = normalizedLine.slice(labelEnd, nextLabelStart);
+
+      if (/(N\s*\/\s*A|NA|N\.A\.?|NONE|--|—|–)/.test(segmentAfterLabel)) {
+        continue;
+      }
+
       let matchedValue = null;
       let bestDistance = Infinity;
 
       numberPattern.lastIndex = 0;
       let numberMatch;
 
-      while ((numberMatch = numberPattern.exec(line)) !== null) {
+      while ((numberMatch = numberPattern.exec(segmentAfterLabel)) !== null) {
         const value = parseFloat(numberMatch[1]);
         if (!Number.isFinite(value) || value <= 0 || value > 1000) {
           continue;
         }
 
-        const numberStart = numberMatch.index;
-        const numberEnd = numberStart + numberMatch[0].length;
-        if (numberStart >= labelStart && numberEnd <= labelEnd) {
+        const distance = numberMatch.index;
+        if (distance > 12 || distance >= bestDistance) {
           continue;
         }
 
-        const distance = numberStart >= labelEnd ? numberStart - labelEnd : labelStart - numberEnd;
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          matchedValue = value;
-        }
+        bestDistance = distance;
+        matchedValue = value;
       }
 
       if (matchedValue !== null) {
@@ -2089,6 +3011,10 @@ function buildFallbackSizes(garmentType, observedText) {
 }
 
 function normalizeNumericGuideValues(sizes) {
+  if ((sizes || []).some((size) => size?.measurementType)) {
+    return sortSizes(dedupeSizes(sizes || []));
+  }
+
   const ordered = sortSizes(dedupeSizes(sizes || []));
   if (!ordered.length) {
     return ordered;
@@ -2267,8 +3193,13 @@ async function parseSizeGuideImage(file, garmentType = '') {
   }
 
   if (sizes.length === 0) {
-    console.log('No reliable OCR sizes found. Generating robust fallback size set.');
-    sizes = buildFallbackSizes(garmentType, observedText);
+    const inferredLabels = inferSizeLabelsFromText(observedText);
+    if (inferredLabels.length > 0) {
+      console.log('Detected size labels without reliable numeric associations. Skipping fallback sizes to avoid fabricated entries.', inferredLabels);
+    } else {
+      console.log('No reliable OCR sizes found. Generating robust fallback size set.');
+      sizes = buildFallbackSizes(garmentType, observedText);
+    }
   }
 
   const normalized = normalizeNumericGuideValues(sizes);
@@ -2330,14 +3261,25 @@ app.post('/analyze-image', upload.any(), async (req, res) => {
       }
 
       analyses = sizeGuideEntries.map((entry) => entry.analysis);
-      sizes = sortSizes(dedupeSizes(rawSizeEntries));
+      // Keep all parsed measurement rows so each size can carry multiple measurements.
+      sizes = sortSizes(
+        rawSizeEntries.map((entry) => ({
+          ...entry,
+          label: entry.sizeLabel || entry.label,
+        })),
+      );
       console.log('Size guide processing complete. Sizes:', sizes);
     } else if (req.body.type === 'clothing') {
-      console.log('Processing as clothing cutout...');
-      const cutoutResult = await createGarmentCutout(primaryFile.buffer, req.body.garmentType, primaryFile.mimetype);
-      processedImageUrl = cutoutResult.pngDataUrl;
-      cutout = cutoutResult.cutout;
-      console.log('Clothing cutout complete:', cutout);
+      console.log('Processing as clothing 3D garment model...');
+      const garmentResult = await createGarment3DModel(primaryFile.buffer, req.body.garmentType, primaryFile.mimetype);
+      processedImageUrl = garmentResult.pngDataUrl;
+      cutout = garmentResult.cutout;
+      console.log('Garment model generation complete:', {
+        cutout,
+        hasModel: Boolean(garmentResult.garmentModel),
+        vertexCount: garmentResult.garmentModel ? Math.floor(garmentResult.garmentModel.positions.length / 3) : 0,
+      });
+      res.locals.garmentModel = garmentResult.garmentModel;
     } else {
       console.log('Processing as generic image');
     }
@@ -2352,6 +3294,7 @@ app.post('/analyze-image', upload.any(), async (req, res) => {
       sizes,
       processedImageUrl,
       cutout,
+      garmentModel: req.body.type === 'clothing' ? (res.locals.garmentModel || null) : undefined,
     });
   } catch (error) {
     console.error('Image analysis failed:', error);
