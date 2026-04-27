@@ -78,6 +78,8 @@ let previewPointer = null;
 let isDraggingPreviewGarment = false;
 let previewDragPlane = null;
 let previewDragOffset = null;
+let garmentSimulationState = null;
+let garmentSimulationLastTimestamp = 0;
 
 function getSizeGuideScaleMultiplier() {
   const numericSize = Number(currentClothingSizeValue);
@@ -118,6 +120,8 @@ function isLengthMeasurement(label) {
 function getCircumferenceMeasurementMultiplier(label) {
   // Only explicit flat/half-width style measurements should be doubled.
   // Circumference-like labels (WAIST/CHEST/HIP/BUST) are already full values.
+  // Note: WIDTH multiplier is technically applied but becomes irrelevant due to front/back
+  // panel mirroring which creates the full 3D depth from the laid-flat measurement.
   if (!label) return 1;
   const normalizedLabel = String(label).toUpperCase();
   const flatKeywords = ['WIDTH', 'HALF', 'ACROSS'];
@@ -798,6 +802,16 @@ function initModelViewer() {
 function animateModel() {
   requestAnimationFrame(animateModel);
   if (controls) controls.update();
+  if (garmentSimulationState) {
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const deltaSeconds = garmentSimulationLastTimestamp > 0
+      ? Math.max(0.004, Math.min(0.05, (now - garmentSimulationLastTimestamp) / 1000))
+      : 1 / 60;
+    garmentSimulationLastTimestamp = now;
+    stepGarmentSimulation(deltaSeconds);
+  } else {
+    garmentSimulationLastTimestamp = 0;
+  }
   if (renderer && scene && camera) {
     renderer.render(scene, camera);
   }
@@ -900,6 +914,21 @@ function alignGarmentToCurrentModel() {
   );
   generatedGarmentMesh.updateMatrixWorld(true);
 
+  // Safety invariant: garment should never be taller than the model in world space.
+  const scaledGarmentBox = new THREE_LIB.Box3().setFromObject(generatedGarmentMesh);
+  const scaledGarmentSize = scaledGarmentBox.getSize(new THREE_LIB.Vector3());
+  const maxGarmentHeight = Math.max(0.0001, modelSize.y * 0.985);
+  let heightClampRatio = 1;
+  if (scaledGarmentSize.y > maxGarmentHeight) {
+    heightClampRatio = maxGarmentHeight / Math.max(0.0001, scaledGarmentSize.y);
+    generatedGarmentMesh.scale.set(
+      generatedGarmentMesh.scale.x,
+      generatedGarmentMesh.scale.y * heightClampRatio,
+      generatedGarmentMesh.scale.z
+    );
+    generatedGarmentMesh.updateMatrixWorld(true);
+  }
+
   const garmentBoxAfter = new THREE_LIB.Box3().setFromObject(generatedGarmentMesh);
   const garmentCenter = garmentBoxAfter.getCenter(new THREE_LIB.Vector3());
   const targetCenter = new THREE_LIB.Vector3(
@@ -911,6 +940,16 @@ function alignGarmentToCurrentModel() {
   const offset = targetCenter.sub(garmentCenter);
   generatedGarmentMesh.position.add(offset);
   generatedGarmentMesh.updateMatrixWorld(true);
+
+  // Basic collision response: if garment bbox intersects avatar bbox, push garment forward.
+  const collisionGarmentBox = new THREE_LIB.Box3().setFromObject(generatedGarmentMesh);
+  if (!collisionGarmentBox.isEmpty() && collisionGarmentBox.intersectsBox(modelBox)) {
+    const pushDepth = modelBox.max.z - collisionGarmentBox.min.z;
+    if (pushDepth > 0) {
+      generatedGarmentMesh.position.z += pushDepth + modelSize.z * 0.03;
+      generatedGarmentMesh.updateMatrixWorld(true);
+    }
+  }
 
   if (generatedGarmentMesh.parent !== currentModel && typeof currentModel.attach === 'function') {
     currentModel.attach(generatedGarmentMesh);
@@ -925,6 +964,7 @@ function alignGarmentToCurrentModel() {
     hasProvidedMeasurements,
     widthMeasurementType,
     widthMeasurementMultiplier,
+    heightClampRatio: Number(heightClampRatio.toFixed(4)),
     selectedSize: getSelectedSizeInches(),
     modelHeightInches: Number(getModelHeightInches().toFixed(2)),
     ppi: Number((modelMeasurementCalibration?.modelUnitsPerInch || getPixelsPerInch()).toFixed(6)),
@@ -934,6 +974,9 @@ function alignGarmentToCurrentModel() {
 }
 
 function clearGeneratedGarmentMesh() {
+  garmentSimulationState = null;
+  garmentSimulationLastTimestamp = 0;
+
   if (!scene || !generatedGarmentMesh) return;
   if (generatedGarmentMesh.parent) {
     generatedGarmentMesh.parent.remove(generatedGarmentMesh);
@@ -969,6 +1012,423 @@ function dataUrlToArrayBuffer(dataUrl) {
   return bytes.buffer;
 }
 
+function createGarmentMaterial(textureDataUrl = null) {
+  const materialOptions = {
+    color: 0x8a8f99,
+    side: THREE_LIB.DoubleSide,
+    roughness: 0.86,
+    metalness: 0.02,
+  };
+
+  if (textureDataUrl) {
+    const textureLoader = new THREE_LIB.TextureLoader();
+    const texture = textureLoader.load(textureDataUrl);
+    texture.flipY = false;
+    materialOptions.map = texture;
+    materialOptions.color = 0xffffff;
+  }
+
+  return new THREE_LIB.MeshStandardMaterial(materialOptions);
+}
+
+function startGarmentSimulation(modelPayload) {
+  if (!THREE_LIB || !generatedGarmentMesh || !currentModel) return;
+  if (!modelPayload || modelPayload.format !== 'tri-mesh') return;
+
+  const geometry = generatedGarmentMesh.geometry;
+  const positionAttr = geometry?.attributes?.position;
+  if (!positionAttr?.array || positionAttr.array.length < 9) return;
+
+  const vertexCount = Math.floor(positionAttr.array.length / 3);
+  if (vertexCount < 3 || vertexCount > 90000) return;
+
+  const positions = positionAttr.array;
+  const basePositions = Float32Array.from(positions);
+  const velocities = new Float32Array(positions.length);
+
+  const panelIds = Array.isArray(modelPayload.panelIds) ? modelPayload.panelIds : null;
+  const surfaceSides = Array.isArray(modelPayload.surfaceSides) ? modelPayload.surfaceSides : null;
+  const seamPanelCount = Number.isFinite(Number(modelPayload.seamPanelCount)) ? Number(modelPayload.seamPanelCount) : 0;
+  const pinnedFlags = Array.isArray(modelPayload.pinnedVertices)
+    ? modelPayload.pinnedVertices.map((value) => Boolean(value))
+    : new Array(vertexCount).fill(false);
+
+  if (panelIds && seamPanelCount > 1 && panelIds.length >= vertexCount) {
+    const explodeRadius = 0.018;
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      const panel = Number(panelIds[vertex]) || 0;
+      const bucket = panel % seamPanelCount;
+      const angle = ((bucket / Math.max(1, seamPanelCount)) * Math.PI * 2) - Math.PI;
+      positions[vertex * 3] += Math.sin(angle) * explodeRadius * 0.4;
+      positions[vertex * 3 + 2] += Math.cos(angle) * explodeRadius;
+    }
+  }
+
+  const stitchPairs = Array.isArray(modelPayload.stitchPairs) ? modelPayload.stitchPairs : [];
+  const selfCollisionPairs = Array.isArray(modelPayload.selfCollisionPairs) ? modelPayload.selfCollisionPairs : [];
+  const restLengths = [];
+  for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
+    const first = Number(stitchPairs[pair]);
+    const second = Number(stitchPairs[pair + 1]);
+    if (!Number.isInteger(first) || !Number.isInteger(second) || first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) {
+      restLengths.push(0);
+      continue;
+    }
+
+    const firstBase = first * 3;
+    const secondBase = second * 3;
+    const dx = basePositions[firstBase] - basePositions[secondBase];
+    const dy = basePositions[firstBase + 1] - basePositions[secondBase + 1];
+    const dz = basePositions[firstBase + 2] - basePositions[secondBase + 2];
+    restLengths.push(Math.sqrt(dx * dx + dy * dy + dz * dz));
+  }
+
+  const indexArray = geometry?.index?.array;
+  const structuralPairs = [];
+  const structuralRestLengths = [];
+  if (indexArray && indexArray.length >= 3) {
+    const edgeKeys = new Set();
+    const addStructuralEdge = (first, second) => {
+      if (!Number.isInteger(first) || !Number.isInteger(second)) return;
+      if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount || first === second) return;
+
+      if (surfaceSides && surfaceSides.length >= vertexCount) {
+        const firstSide = Number(surfaceSides[first]);
+        const secondSide = Number(surfaceSides[second]);
+        if (Number.isFinite(firstSide) && Number.isFinite(secondSide) && firstSide !== secondSide) {
+          return;
+        }
+      }
+
+      const min = Math.min(first, second);
+      const max = Math.max(first, second);
+      const key = `${min}:${max}`;
+      if (edgeKeys.has(key)) return;
+      edgeKeys.add(key);
+
+      const firstBase = first * 3;
+      const secondBase = second * 3;
+      const dx = basePositions[firstBase] - basePositions[secondBase];
+      const dy = basePositions[firstBase + 1] - basePositions[secondBase + 1];
+      const dz = basePositions[firstBase + 2] - basePositions[secondBase + 2];
+      const restLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (!Number.isFinite(restLength) || restLength <= 1e-6) return;
+
+      structuralPairs.push(first, second);
+      structuralRestLengths.push(restLength);
+    };
+
+    for (let tri = 0; tri < indexArray.length - 2; tri += 3) {
+      const i0 = Number(indexArray[tri]);
+      const i1 = Number(indexArray[tri + 1]);
+      const i2 = Number(indexArray[tri + 2]);
+      addStructuralEdge(i0, i1);
+      addStructuralEdge(i1, i2);
+      addStructuralEdge(i2, i0);
+    }
+  }
+
+  garmentSimulationState = {
+    geometry,
+    positionAttr,
+    positions,
+    basePositions,
+    velocities,
+    vertexCount,
+    pinnedFlags,
+    structuralPairs,
+    structuralRestLengths,
+    stitchPairs,
+    restLengths,
+    selfCollisionPairs,
+    surfaceSides,
+    seamPanelCount,
+    frame: 0,
+  };
+
+  garmentSimulationLastTimestamp = 0;
+  updateDebugPanel('Started continuous garment simulation.', {
+    vertexCount,
+    structuralEdgeCount: Math.floor(structuralPairs.length / 2),
+    stitchPairCount: Math.floor(stitchPairs.length / 2),
+    selfCollisionPairCount: Math.floor(selfCollisionPairs.length / 2),
+    seamPanelCount,
+  });
+}
+
+// Cached downsampled model point cloud for collision (rebuilt when model changes)
+let _bodyCollisionCache = null;
+let _bodyCollisionCacheModel = null;
+
+function getBodyCollisionCloud(modelMesh, garmentMesh) {
+  if (_bodyCollisionCacheModel === modelMesh && _bodyCollisionCache) {
+    return _bodyCollisionCache;
+  }
+
+  // Sample up to 400 points from the body mesh in garment-local space
+  const MAX_SAMPLES = 400;
+  const samples = [];
+
+  modelMesh.traverse((mesh) => {
+    if (!mesh.isMesh || !mesh.geometry?.attributes?.position) return;
+    const posAttr = mesh.geometry.attributes.position;
+    const step = Math.max(1, Math.floor(posAttr.count / (MAX_SAMPLES / 4)));
+    const tmp = new THREE_LIB.Vector3();
+    for (let i = 0; i < posAttr.count; i += step) {
+      tmp.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+      mesh.localToWorld(tmp);
+      garmentMesh.worldToLocal(tmp);
+      samples.push(tmp.x, tmp.y, tmp.z);
+      if (samples.length / 3 >= MAX_SAMPLES) return;
+    }
+  });
+
+  _bodyCollisionCache = new Float32Array(samples);
+  _bodyCollisionCacheModel = modelMesh;
+  return _bodyCollisionCache;
+}function stepGarmentSimulation(deltaSeconds) {
+  if (!THREE_LIB || !garmentSimulationState || !generatedGarmentMesh || !currentModel) {
+    garmentSimulationState = null;
+    return;
+  }
+
+  const state = garmentSimulationState;
+  const {
+    geometry,
+    positionAttr,
+    positions,
+    basePositions,
+    velocities,
+    vertexCount,
+    pinnedFlags,
+    structuralPairs,
+    structuralRestLengths,
+    stitchPairs,
+    restLengths,
+    selfCollisionPairs,
+    surfaceSides,
+  } = state;
+
+  const modelBox = new THREE_LIB.Box3().setFromObject(currentModel);
+  if (modelBox.isEmpty()) {
+    garmentSimulationState = null;
+    return;
+  }
+
+  const modelSize = modelBox.getSize(new THREE_LIB.Vector3());
+  const modelCenterWorld = modelBox.getCenter(new THREE_LIB.Vector3());
+  const modelCenterLocal = generatedGarmentMesh.worldToLocal(modelCenterWorld.clone());
+
+  const frontPlaneWorld = new THREE_LIB.Vector3(modelCenterWorld.x, modelCenterWorld.y, modelBox.max.z + modelSize.z * 0.01);
+  const backPlaneWorld = new THREE_LIB.Vector3(modelCenterWorld.x, modelCenterWorld.y, modelBox.min.z - modelSize.z * 0.01);
+  const leftPlaneWorld = new THREE_LIB.Vector3(modelBox.min.x - modelSize.x * 0.01, modelCenterWorld.y, modelCenterWorld.z);
+  const rightPlaneWorld = new THREE_LIB.Vector3(modelBox.max.x + modelSize.x * 0.01, modelCenterWorld.y, modelCenterWorld.z);
+
+  const frontPlaneZ = generatedGarmentMesh.worldToLocal(frontPlaneWorld).z;
+  const backPlaneZ = generatedGarmentMesh.worldToLocal(backPlaneWorld).z;
+  const leftPlaneX = generatedGarmentMesh.worldToLocal(leftPlaneWorld).x;
+  const rightPlaneX = generatedGarmentMesh.worldToLocal(rightPlaneWorld).x;
+
+  const torsoRadiusX = Math.max(0.02, Math.abs((rightPlaneX - leftPlaneX) * 0.47));
+  const torsoRadiusZ = Math.max(0.02, Math.abs((frontPlaneZ - backPlaneZ) * 0.5));
+  const torsoTop = generatedGarmentMesh.worldToLocal(new THREE_LIB.Vector3(modelCenterWorld.x, modelBox.max.y, modelCenterWorld.z)).y;
+  const torsoBottom = generatedGarmentMesh.worldToLocal(new THREE_LIB.Vector3(modelCenterWorld.x, modelBox.min.y, modelCenterWorld.z)).y;
+
+  const deltaScale = deltaSeconds * 60;
+  const gravity = -0.00095 * deltaScale;
+  const damping = Math.pow(0.94, deltaScale);
+  const memory = Math.min(0.08, 0.018 * deltaScale);
+
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (pinnedFlags[vertex]) continue;
+
+    const index = vertex * 3;
+
+    velocities[index + 1] += gravity;
+    velocities[index] *= damping;
+    velocities[index + 1] *= damping;
+    velocities[index + 2] *= damping;
+
+    const maxVelocity = 0.055;
+    velocities[index] = Math.max(-maxVelocity, Math.min(maxVelocity, velocities[index]));
+    velocities[index + 1] = Math.max(-maxVelocity, Math.min(maxVelocity, velocities[index + 1]));
+    velocities[index + 2] = Math.max(-maxVelocity, Math.min(maxVelocity, velocities[index + 2]));
+
+    positions[index] += velocities[index];
+    positions[index + 1] += velocities[index + 1];
+    positions[index + 2] += velocities[index + 2];
+
+    positions[index] += (basePositions[index] - positions[index]) * memory;
+    positions[index + 1] += (basePositions[index + 1] - positions[index + 1]) * memory;
+    positions[index + 2] += (basePositions[index + 2] - positions[index + 2]) * (memory * 0.5);
+
+    const dxFromBase = positions[index] - basePositions[index];
+    const dyFromBase = positions[index + 1] - basePositions[index + 1];
+    const dzFromBase = positions[index + 2] - basePositions[index + 2];
+    const displacement = Math.sqrt(dxFromBase * dxFromBase + dyFromBase * dyFromBase + dzFromBase * dzFromBase);
+    const maxDisplacement = 0.34;
+    if (displacement > maxDisplacement) {
+      const pullback = maxDisplacement / Math.max(1e-5, displacement);
+      positions[index] = basePositions[index] + dxFromBase * pullback;
+      positions[index + 1] = basePositions[index + 1] + dyFromBase * pullback;
+      positions[index + 2] = basePositions[index + 2] + dzFromBase * pullback;
+      velocities[index] *= 0.5;
+      velocities[index + 1] *= 0.5;
+      velocities[index + 2] *= 0.5;
+    }
+
+    const y = positions[index + 1];
+
+    if (y <= torsoTop && y >= torsoBottom) {
+      const relX = positions[index] - modelCenterLocal.x;
+      const relZ = positions[index + 2] - modelCenterLocal.z;
+      const norm = Math.sqrt((relX * relX) / (torsoRadiusX * torsoRadiusX) + (relZ * relZ) / (torsoRadiusZ * torsoRadiusZ));
+      if (norm < 1) {
+        const safeNorm = Math.max(1e-4, norm);
+        const targetX = modelCenterLocal.x + (relX / safeNorm) * torsoRadiusX;
+        const targetZ = modelCenterLocal.z + (relZ / safeNorm) * torsoRadiusZ;
+        positions[index] = targetX;
+        positions[index + 2] = targetZ;
+        velocities[index] *= 0.45;
+        velocities[index + 2] *= 0.45;
+      }
+    }
+
+    if (positions[index + 2] < backPlaneZ) {
+      positions[index + 2] = backPlaneZ;
+      velocities[index + 2] = Math.max(0, velocities[index + 2]) * 0.35;
+    }
+    if (positions[index + 2] > frontPlaneZ) {
+      positions[index + 2] = frontPlaneZ;
+      velocities[index + 2] = Math.min(0, velocities[index + 2]) * 0.35;
+    }
+  }
+
+  const structuralIterations = 2;
+  for (let iteration = 0; iteration < structuralIterations; iteration += 1) {
+    for (let pair = 0; pair < structuralPairs.length - 1; pair += 2) {
+      const first = Number(structuralPairs[pair]);
+      const second = Number(structuralPairs[pair + 1]);
+      const restLength = structuralRestLengths[pair / 2] || 0;
+      if (restLength <= 0) continue;
+      if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+
+      const firstIndex = first * 3;
+      const secondIndex = second * 3;
+
+      const dx = positions[firstIndex] - positions[secondIndex];
+      const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
+      const dz = positions[firstIndex + 2] - positions[secondIndex + 2];
+      const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (currentLength < 1e-6) continue;
+
+      const correction = ((currentLength - restLength) / currentLength) * 0.24;
+      const correctionX = dx * correction;
+      const correctionY = dy * correction;
+      const correctionZ = dz * correction;
+
+      if (!pinnedFlags[first]) {
+        positions[firstIndex] -= correctionX * 0.5;
+        positions[firstIndex + 1] -= correctionY * 0.5;
+        positions[firstIndex + 2] -= correctionZ * 0.5;
+      }
+      if (!pinnedFlags[second]) {
+        positions[secondIndex] += correctionX * 0.5;
+        positions[secondIndex + 1] += correctionY * 0.5;
+        positions[secondIndex + 2] += correctionZ * 0.5;
+      }
+    }
+  }
+
+  const stitchIterations = 3;
+  for (let iteration = 0; iteration < stitchIterations; iteration += 1) {
+    for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
+      const first = Number(stitchPairs[pair]);
+      const second = Number(stitchPairs[pair + 1]);
+      const restLength = restLengths[pair / 2] || 0;
+      if (restLength <= 0) continue;
+      if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+
+      const firstIndex = first * 3;
+      const secondIndex = second * 3;
+
+      const dx = positions[firstIndex] - positions[secondIndex];
+      const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
+      const dz = positions[firstIndex + 2] - positions[secondIndex + 2];
+      const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (currentLength < 1e-6) continue;
+
+      const correction = ((currentLength - restLength) / currentLength) * 0.42;
+      const correctionX = dx * correction;
+      const correctionY = dy * correction;
+      const correctionZ = dz * correction;
+
+      if (!pinnedFlags[first]) {
+        positions[firstIndex] -= correctionX * 0.5;
+        positions[firstIndex + 1] -= correctionY * 0.5;
+        positions[firstIndex + 2] -= correctionZ * 0.5;
+      }
+      if (!pinnedFlags[second]) {
+        positions[secondIndex] += correctionX * 0.5;
+        positions[secondIndex + 1] += correctionY * 0.5;
+        positions[secondIndex + 2] += correctionZ * 0.5;
+      }
+    }
+  }
+
+  const selfCollisionIterations = 3;
+  const minSeparation = 0.038;
+  for (let iteration = 0; iteration < selfCollisionIterations; iteration += 1) {
+    for (let pair = 0; pair < selfCollisionPairs.length - 1; pair += 2) {
+      const first = Number(selfCollisionPairs[pair]);
+      const second = Number(selfCollisionPairs[pair + 1]);
+      if (!Number.isInteger(first) || !Number.isInteger(second)) continue;
+      if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+
+      const firstIndex = first * 3;
+      const secondIndex = second * 3;
+
+      let dx = positions[firstIndex] - positions[secondIndex];
+      let dy = positions[firstIndex + 1] - positions[secondIndex + 1];
+      let dz = positions[firstIndex + 2] - positions[secondIndex + 2];
+      let distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+      if (distance < 1e-5) {
+        const sideFirst = surfaceSides && Number.isFinite(Number(surfaceSides[first])) ? Number(surfaceSides[first]) : 0;
+        const sideSecond = surfaceSides && Number.isFinite(Number(surfaceSides[second])) ? Number(surfaceSides[second]) : 1;
+        dz = sideFirst === sideSecond ? 0.001 : (sideFirst < sideSecond ? 1 : -1) * 0.001;
+        dx = 0;
+        dy = 0;
+        distance = Math.abs(dz);
+      }
+
+      if (distance >= minSeparation) continue;
+
+      const correction = (minSeparation - distance) / distance;
+      const pushX = dx * correction * 0.28;
+      const pushY = dy * correction * 0.28;
+      const pushZ = dz * correction * 0.45;
+
+      if (!pinnedFlags[first]) {
+        positions[firstIndex] += pushX;
+        positions[firstIndex + 1] += pushY;
+        positions[firstIndex + 2] += pushZ;
+      }
+      if (!pinnedFlags[second]) {
+        positions[secondIndex] -= pushX;
+        positions[secondIndex + 1] -= pushY;
+        positions[secondIndex + 2] -= pushZ;
+      }
+    }
+  }
+
+  positionAttr.needsUpdate = true;
+  state.frame += 1;
+  if (state.frame % 2 === 0) {
+    geometry.computeVertexNormals();
+  }
+}
+
 function setGeneratedGarmentMesh(modelPayload) {
   if (!THREE_LIB) {
     updateDebugPanel('Three.js is missing. Cannot render garment model.');
@@ -999,16 +1459,15 @@ function setGeneratedGarmentMesh(modelPayload) {
     const loader = new THREE_LIB.GLTFLoader();
     loader.parse(glbBuffer, '', (gltf) => {
       generatedGarmentMesh = gltf.scene;
+      generatedGarmentMesh.userData.garmentPayload = modelPayload;
       generatedGarmentMesh.name = 'GeneratedGarmentGLB';
       generatedGarmentMesh.position.set(0, 0, 0);
       generatedGarmentMesh.traverse((child) => {
         if (!child?.isMesh) return;
-        child.material = new THREE_LIB.MeshStandardMaterial({
-          color: 0xff1493,
-          roughness: 0.78,
-          metalness: 0.04,
-          side: THREE_LIB.DoubleSide,
-        });
+        if (!child.material) {
+          child.material = createGarmentMaterial(modelPayload.textureDataUrl || null);
+        }
+        child.material.side = THREE_LIB.DoubleSide;
       });
 
       const bounds = new THREE_LIB.Box3().setFromObject(generatedGarmentMesh);
@@ -1018,7 +1477,12 @@ function setGeneratedGarmentMesh(modelPayload) {
       generatedGarmentMesh.scale.setScalar(generatedGarmentBaseScale);
 
       scene.add(generatedGarmentMesh);
-      alignGarmentToCurrentModel();
+      if (currentModel) {
+        alignGarmentToCurrentModel();
+        startGarmentSimulation(modelPayload);
+      } else {
+        fitModelToView(generatedGarmentMesh);
+      }
       setPreviewBackground(true);
       if (previewHint) {
         previewHint.hidden = true;
@@ -1054,14 +1518,10 @@ function setGeneratedGarmentMesh(modelPayload) {
   geometry.setIndex(modelPayload.indices);
   geometry.computeVertexNormals();
 
-  const material = new THREE_LIB.MeshStandardMaterial({
-    color: 0xff1493,
-    side: THREE_LIB.DoubleSide,
-    roughness: 0.78,
-    metalness: 0.04,
-  });
+  const material = createGarmentMaterial(modelPayload.textureDataUrl || null);
 
   generatedGarmentMesh = new THREE_LIB.Mesh(geometry, material);
+  generatedGarmentMesh.userData.garmentPayload = modelPayload;
   generatedGarmentMesh.name = 'GeneratedGarmentMesh';
   generatedGarmentMesh.position.set(0, 0, 0);
 
@@ -1072,7 +1532,12 @@ function setGeneratedGarmentMesh(modelPayload) {
   generatedGarmentMesh.scale.setScalar(generatedGarmentBaseScale);
 
   scene.add(generatedGarmentMesh);
-  alignGarmentToCurrentModel();
+  if (currentModel) {
+    alignGarmentToCurrentModel();
+    startGarmentSimulation(modelPayload);
+  } else {
+    fitModelToView(generatedGarmentMesh);
+  }
   setPreviewBackground(true);
   if (previewHint) {
     previewHint.hidden = true;
@@ -1496,6 +1961,15 @@ function renderSizeButtons(sizes) {
   uniqueSizes.forEach((size) => {
     sizeButtons.appendChild(createSizeButton(size));
   });
+
+  // Auto-select middle size
+  if (uniqueSizes.length > 0) {
+    const middleIndex = Math.floor(uniqueSizes.length / 2);
+    const middleButton = sizeButtons.querySelector(`button:nth-child(${middleIndex + 1})`);
+    if (middleButton) {
+      middleButton.click();
+    }
+  }
 }
 
 function loadScanFile(file) {
@@ -1740,12 +2214,9 @@ if (analyzeButton) {
     });
 
     try {
-      let clothingResult = cachedClothingResult;
-      if (!clothingResult || analysisKey !== cachedClothingAnalysisKey) {
-        clothingResult = await analyzeImages(clothingFile, 'clothing', garmentType);
-        cachedClothingAnalysisKey = analysisKey;
-        cachedClothingResult = clothingResult;
-      }
+      const clothingResult = await analyzeImages(clothingFile, 'clothing', garmentType);
+      cachedClothingAnalysisKey = analysisKey;
+      cachedClothingResult = clothingResult;
 
       console.log('Clothing result:', clothingResult);
       updateDebugPanel('Clothing API response received.', {
