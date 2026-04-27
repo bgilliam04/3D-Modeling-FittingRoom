@@ -3,10 +3,71 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const { fork } = require('child_process');
 const sizeOf = require('image-size');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
-const { removeBackground } = require('@imgly/background-removal-node');
+
+let removeBackgroundFn = null;
+let loggedRawImageUnavailable = false;
+
+function getRemoveBackground() {
+  if (!removeBackgroundFn) {
+    ({ removeBackground: removeBackgroundFn } = require('@imgly/background-removal-node'));
+  }
+
+  return removeBackgroundFn;
+}
+
+async function removeBackgroundWithSilentWorker(orientedBuffer) {
+  const workerPath = path.join(__dirname, 'scripts', 'remove-background-worker.js');
+
+  return new Promise((resolve, reject) => {
+    const worker = fork(workerPath, [], {
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    });
+
+    let settled = false;
+
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      callback();
+    };
+
+    worker.on('message', (message) => {
+      if (!message || typeof message !== 'object') {
+        return;
+      }
+
+      if (message.ok && typeof message.outputBase64 === 'string') {
+        finish(() => resolve(Buffer.from(message.outputBase64, 'base64')));
+        return;
+      }
+
+      const errorMessage = typeof message.error === 'string' ? message.error : 'Background removal worker failed.';
+      finish(() => reject(new Error(errorMessage)));
+    });
+
+    worker.on('error', (error) => {
+      finish(() => reject(error));
+    });
+
+    worker.on('exit', (code) => {
+      if (settled) {
+        return;
+      }
+
+      const exitCode = Number.isInteger(code) ? code : -1;
+      finish(() => reject(new Error(`Background removal worker exited before returning output (code ${exitCode}).`)));
+    });
+
+    worker.send({
+      imageBase64: orientedBuffer.toString('base64'),
+      mimeType: 'image/png',
+    });
+  });
+}
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -22,15 +83,33 @@ app.get('/', (req, res) => {
 });
 
 function buildAnalysis(file) {
+  if (!file || !file.buffer || !Buffer.isBuffer(file.buffer)) {
+    return {
+      fileName: file?.originalname || 'unknown',
+      mimeType: file?.mimetype || null,
+      fileSize: Number(file?.size) || 0,
+      width: null,
+      height: null,
+      orientation: null,
+      colorSpace: null,
+      notes: 'Backend metadata analysis skipped: invalid or missing image buffer.',
+    };
+  }
+
   const { buffer, originalname, mimetype, size } = file;
-  const dimensions = sizeOf(buffer);
+  let dimensions = {};
+  try {
+    dimensions = sizeOf(buffer) || {};
+  } catch (error) {
+    dimensions = {};
+  }
 
   return {
     fileName: originalname,
     mimeType: mimetype,
     fileSize: size,
-    width: dimensions.width,
-    height: dimensions.height,
+    width: Number.isFinite(dimensions.width) ? dimensions.width : null,
+    height: Number.isFinite(dimensions.height) ? dimensions.height : null,
     orientation: dimensions.orientation || null,
     colorSpace: dimensions.type || null,
     notes: 'Backend metadata analysis for the uploaded asset.',
@@ -1226,63 +1305,61 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
 async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '') {
   const normalizedGarmentType = normalizeGarmentType(garmentType);
   const orientedBuffer = await sharp(buffer).rotate().png().toBuffer();
-  const orientedPngBlob = new Blob([orientedBuffer], { type: 'image/png' });
+  let cutoutBuffer;
 
-  const outputBlob = await removeBackground(orientedPngBlob, {
-    model: 'medium',
-    output: {
-      quality: 0.8,
-      format: 'image/png',
-      type: 'foreground',
-    },
-  });
+  try {
+    cutoutBuffer = await removeBackgroundWithSilentWorker(orientedBuffer);
+  } catch (workerError) {
+    console.warn('Background removal worker failed, falling back to in-process execution:', workerError.message);
 
-  const outputArrayBuffer = await outputBlob.arrayBuffer();
-  const cutoutBuffer = Buffer.from(outputArrayBuffer);
+    const orientedPngBlob = new Blob([orientedBuffer], { type: 'image/png' });
+    const removeBackground = getRemoveBackground();
+    const outputBlob = await removeBackground(orientedPngBlob, {
+      model: 'medium',
+      output: {
+        quality: 0.8,
+        format: 'image/png',
+        type: 'foreground',
+      },
+    });
+
+    const outputArrayBuffer = await outputBlob.arrayBuffer();
+    cutoutBuffer = Buffer.from(outputArrayBuffer);
+  }
+
   let finalBuffer = cutoutBuffer;
   let cutoutInfo = await sharp(cutoutBuffer).metadata();
   let offsetX = 0;
   let offsetY = 0;
 
   try {
-    const cutoutRawImage = await rawImageFromBuffer(cutoutBuffer, 'image/png');
-    const refined = refineCutoutMask(cutoutRawImage, normalizedGarmentType);
-
-    if (refined && refined.image) {
-      const refinedPngBuffer = await rawImageToPngBuffer(refined.image);
-      if (refined.bounds && refined.bounds.width > 0 && refined.bounds.height > 0) {
-        const cropProfile = getClothingShapeProfile(normalizedGarmentType);
-        const cropPadding = cropProfile?.cropPadding || { x: 0.12, top: 0.14, bottom: 0.18 };
-        const padX = Math.max(2, Math.round(refined.bounds.width * (cropPadding.x || 0.12)));
-        const padTop = Math.max(2, Math.round(refined.bounds.height * (cropPadding.top || 0.14)));
-        const padBottom = Math.max(2, Math.round(refined.bounds.height * (cropPadding.bottom || 0.18)));
-
-        const safeLeft = Math.max(0, refined.bounds.left - padX);
-        const safeTop = Math.max(0, refined.bounds.top - padTop);
-        const safeRight = Math.min(cutoutRawImage.width - 1, refined.bounds.left + refined.bounds.width - 1 + padX);
-        const safeBottom = Math.min(cutoutRawImage.height - 1, refined.bounds.top + refined.bounds.height - 1 + padBottom);
-        const safeWidth = Math.max(1, safeRight - safeLeft + 1);
-        const safeHeight = Math.max(1, safeBottom - safeTop + 1);
-
-        finalBuffer = await sharp(refinedPngBuffer)
-          .extract({
-            left: safeLeft,
-            top: safeTop,
-            width: safeWidth,
-            height: safeHeight,
-          })
-          .png()
-          .toBuffer();
-        offsetX = safeLeft;
-        offsetY = safeTop;
-      } else {
-        finalBuffer = refinedPngBuffer;
-      }
-
+    const refinedResult = await refineGarmentCutoutWithSharp(cutoutBuffer, normalizedGarmentType);
+    if (refinedResult?.buffer) {
+      finalBuffer = refinedResult.buffer;
       cutoutInfo = await sharp(finalBuffer).metadata();
+      offsetX = refinedResult.offsetX || 0;
+      offsetY = refinedResult.offsetY || 0;
     }
   } catch (error) {
-    console.warn('Cutout refinement failed, using raw background-removal output:', error.message);
+    console.warn('Sharp cutout refinement failed, using raw background-removal output:', error.message);
+
+    const canRefineWithRawImage = typeof RawImage !== 'undefined';
+    if (canRefineWithRawImage) {
+      try {
+        const cutoutRawImage = await rawImageFromBuffer(cutoutBuffer, 'image/png');
+        const refined = refineCutoutMask(cutoutRawImage, normalizedGarmentType);
+
+        if (refined?.image) {
+          finalBuffer = await rawImageToPngBuffer(refined.image);
+          cutoutInfo = await sharp(finalBuffer).metadata();
+        }
+      } catch (rawRefineError) {
+        console.warn('RawImage refinement fallback failed:', rawRefineError.message);
+      }
+    } else if (!loggedRawImageUnavailable) {
+      console.warn('RawImage is unavailable; no secondary refinement pass will run.');
+      loggedRawImageUnavailable = true;
+    }
   }
 
   return {
@@ -1293,6 +1370,357 @@ async function createGarmentCutout(buffer, garmentType = 'shirt', mimeType = '')
       offsetX,
       offsetY,
     },
+  };
+}
+
+async function refineGarmentCutoutWithSharp(cutoutBuffer, garmentType = 'shirt') {
+  const { data, info } = await sharp(cutoutBuffer)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const width = info.width || 0;
+  const height = info.height || 0;
+  const channels = info.channels || 4;
+  if (width < 2 || height < 2 || channels < 4) {
+    return {
+      buffer: cutoutBuffer,
+      offsetX: 0,
+      offsetY: 0,
+    };
+  }
+
+  const mask = new Uint8Array(width * height);
+  const alphaThreshold = 20;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * channels;
+      const alpha = data[offset + 3];
+      if (alpha <= alphaThreshold) continue;
+
+      mask[index] = 1;
+    }
+  }
+
+  const visited = new Uint8Array(width * height);
+  const queue = [];
+  let queueHead = 0;
+
+  const components = [];
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const maxDistance = Math.max(1, Math.hypot(centerX, centerY));
+  const profile = getClothingShapeProfile(normalizeGarmentType(garmentType));
+  const preferredY = Number.isFinite(profile?.targetY) ? profile.targetY : 0.55;
+
+  for (let start = 0; start < mask.length; start += 1) {
+    if (!mask[start] || visited[start]) continue;
+
+    queue.length = 0;
+    queueHead = 0;
+    queue.push(start);
+    visited[start] = 1;
+
+    const componentPixels = [];
+    let area = 0;
+    let sumX = 0;
+    let sumY = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+    let touchesBorder = false;
+
+    while (queueHead < queue.length) {
+      const current = queue[queueHead++];
+      const x = current % width;
+      const y = Math.floor(current / width);
+
+      componentPixels.push(current);
+      area += 1;
+      sumX += x;
+      sumY += y;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) {
+        touchesBorder = true;
+      }
+
+      const neighbors = [
+        [x + 1, y],
+        [x - 1, y],
+        [x, y + 1],
+        [x, y - 1],
+      ];
+
+      for (const [nx, ny] of neighbors) {
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        const next = ny * width + nx;
+        if (!mask[next] || visited[next]) continue;
+        visited[next] = 1;
+        queue.push(next);
+      }
+    }
+
+    if (area === 0) {
+      continue;
+    }
+
+    const centroidX = sumX / area;
+    const centroidY = sumY / area;
+    components.push({
+      pixels: componentPixels,
+      area,
+      centroidX,
+      centroidY,
+      minX,
+      minY,
+      maxX,
+      maxY,
+      touchesBorder,
+    });
+  }
+
+  components.sort((first, second) => second.area - first.area);
+  let bestPixels = [];
+
+  if (components.length > 0) {
+    const largest = components[0];
+    const secondLargestArea = components[1]?.area || 0;
+
+    // When one component dominates area, trust it over positional heuristics.
+    if (largest.area >= Math.max(1, secondLargestArea * 1.35)) {
+      bestPixels = largest.pixels;
+    } else {
+      let bestScore = -Infinity;
+      for (const component of components) {
+        const centerDistance = Math.hypot(component.centroidX - centerX, component.centroidY - centerY) / maxDistance;
+        const centerFactor = 1 - Math.min(0.7, centerDistance * 0.45);
+        const yNorm = component.centroidY / Math.max(1, height - 1);
+        const verticalFactor = 1 - Math.min(0.45, Math.abs(yNorm - preferredY));
+        const borderFactor = component.touchesBorder ? 0.9 : 1;
+        const score = component.area * centerFactor * verticalFactor * borderFactor;
+        if (score > bestScore) {
+          bestScore = score;
+          bestPixels = component.pixels;
+        }
+      }
+    }
+  }
+
+  if (!bestPixels.length) {
+    return {
+      buffer: cutoutBuffer,
+      offsetX: 0,
+      offsetY: 0,
+    };
+  }
+
+  const keepMask = new Uint8Array(width * height);
+  for (const pixelIndex of bestPixels) {
+    keepMask[pixelIndex] = 1;
+  }
+
+  // Light morphological close to reduce pinholes and zipper artifacts on silhouettes.
+  const closedMask = new Uint8Array(keepMask);
+  for (let pass = 0; pass < 1; pass += 1) {
+    const dilated = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (!closedMask[index]) continue;
+        dilated[index] = 1;
+        if (x > 0) dilated[index - 1] = 1;
+        if (x < width - 1) dilated[index + 1] = 1;
+        if (y > 0) dilated[index - width] = 1;
+        if (y < height - 1) dilated[index + width] = 1;
+      }
+    }
+
+    const eroded = new Uint8Array(width * height);
+    for (let y = 1; y < height - 1; y += 1) {
+      for (let x = 1; x < width - 1; x += 1) {
+        const index = y * width + x;
+        if (
+          dilated[index] &&
+          dilated[index - 1] &&
+          dilated[index + 1] &&
+          dilated[index - width] &&
+          dilated[index + width]
+        ) {
+          eroded[index] = 1;
+        }
+      }
+    }
+
+    closedMask.set(eroded);
+  }
+
+  // Opening removes skinny protrusions that often come from bright backdrop bleed.
+  const openedMask = new Uint8Array(closedMask);
+  for (let pass = 0; pass < 1; pass += 1) {
+    const eroded = new Uint8Array(width * height);
+    for (let y = 1; y < height - 1; y += 1) {
+      for (let x = 1; x < width - 1; x += 1) {
+        const index = y * width + x;
+        if (
+          openedMask[index] &&
+          openedMask[index - 1] &&
+          openedMask[index + 1] &&
+          openedMask[index - width] &&
+          openedMask[index + width]
+        ) {
+          eroded[index] = 1;
+        }
+      }
+    }
+
+    const dilated = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        if (!eroded[index]) continue;
+        dilated[index] = 1;
+        if (x > 0) dilated[index - 1] = 1;
+        if (x < width - 1) dilated[index + 1] = 1;
+        if (y > 0) dilated[index - width] = 1;
+        if (y < height - 1) dilated[index + width] = 1;
+      }
+    }
+
+    openedMask.set(dilated);
+  }
+
+  const outputRaw = Buffer.from(data);
+  const trimmedMask = new Uint8Array(openedMask);
+
+  // Trim bright low-saturation spill on the silhouette boundary.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const nextMask = new Uint8Array(trimmedMask);
+    for (let y = 1; y < height - 1; y += 1) {
+      for (let x = 1; x < width - 1; x += 1) {
+        const index = y * width + x;
+        if (!trimmedMask[index]) continue;
+
+        const neighborLeft = trimmedMask[index - 1];
+        const neighborRight = trimmedMask[index + 1];
+        const neighborUp = trimmedMask[index - width];
+        const neighborDown = trimmedMask[index + width];
+        const boundaryLike = !neighborLeft || !neighborRight || !neighborUp || !neighborDown;
+        if (!boundaryLike) continue;
+
+        let neighbors = 0;
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            if (ox === 0 && oy === 0) continue;
+            if (trimmedMask[(y + oy) * width + (x + ox)]) neighbors += 1;
+          }
+        }
+
+        const offset = index * channels;
+        const red = outputRaw[offset];
+        const green = outputRaw[offset + 1];
+        const blue = outputRaw[offset + 2];
+        const alpha = outputRaw[offset + 3];
+        const maxChannel = Math.max(red, green, blue);
+        const minChannel = Math.min(red, green, blue);
+        const saturation = maxChannel > 0 ? (maxChannel - minChannel) / maxChannel : 0;
+        const brightness = maxChannel / 255;
+        const likelyBackgroundSpill = brightness >= 0.9 && saturation <= 0.12;
+
+        if (likelyBackgroundSpill && (alpha < 170 || neighbors <= 4)) {
+          nextMask[index] = 0;
+        }
+      }
+    }
+
+    trimmedMask.set(nextMask);
+  }
+
+  let openedCount = 0;
+  let trimmedCount = 0;
+  for (let index = 0; index < openedMask.length; index += 1) {
+    if (openedMask[index]) openedCount += 1;
+    if (trimmedMask[index]) trimmedCount += 1;
+  }
+
+  // Safety fallback: if aggressive spill trimming removes too much cloth, keep opened mask.
+  if (trimmedCount < Math.max(64, Math.round(openedCount * 0.52))) {
+    trimmedMask.set(openedMask);
+  }
+
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * channels;
+
+      if (!trimmedMask[index]) {
+        outputRaw[offset + 3] = 0;
+        continue;
+      }
+
+      outputRaw[offset + 3] = Math.max(outputRaw[offset + 3], 192);
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+
+  if (maxX < minX || maxY < minY) {
+    return {
+      buffer: cutoutBuffer,
+      offsetX: 0,
+      offsetY: 0,
+    };
+  }
+
+  const cropProfile = getClothingShapeProfile(normalizeGarmentType(garmentType));
+  const cropPadding = cropProfile?.cropPadding || { x: 0.18, top: 0.2, bottom: 0.24 };
+  const boundsWidth = maxX - minX + 1;
+  const boundsHeight = maxY - minY + 1;
+  const padX = Math.max(4, Math.round(boundsWidth * (cropPadding.x || 0.18)));
+  const padTop = Math.max(4, Math.round(boundsHeight * (cropPadding.top || 0.2)));
+  const padBottom = Math.max(4, Math.round(boundsHeight * (cropPadding.bottom || 0.24)));
+
+  const safeLeft = Math.max(0, minX - padX);
+  const safeTop = Math.max(0, minY - padTop);
+  const safeRight = Math.min(width - 1, maxX + padX);
+  const safeBottom = Math.min(height - 1, maxY + padBottom);
+
+  const safeWidth = Math.max(1, safeRight - safeLeft + 1);
+  const safeHeight = Math.max(1, safeBottom - safeTop + 1);
+
+  const refinedBuffer = await sharp(outputRaw, {
+    raw: {
+      width,
+      height,
+      channels,
+    },
+  })
+    .extract({
+      left: safeLeft,
+      top: safeTop,
+      width: safeWidth,
+      height: safeHeight,
+    })
+    .extend({ top: 2, bottom: 2, left: 2, right: 2, background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .png()
+    .toBuffer();
+
+  return {
+    buffer: refinedBuffer,
+    offsetX: safeLeft,
+    offsetY: safeTop,
   };
 }
 
@@ -1367,8 +1795,8 @@ async function inferGarment3DWithXClothService(inputBuffer, garmentType, mimeTyp
   }
 }
 
-async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt', mimeType = '') {
-  const cutoutResult = await createGarmentCutout(buffer, garmentType, mimeType);
+async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt', mimeType = '', existingCutoutResult = null) {
+  const cutoutResult = existingCutoutResult || await createGarmentCutout(buffer, garmentType, mimeType);
   const cutoutDataUrl = cutoutResult?.pngDataUrl || null;
 
   if (!cutoutDataUrl || !cutoutDataUrl.startsWith('data:image/png;base64,')) {
@@ -1380,7 +1808,8 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
 
   const cutoutBuffer = Buffer.from(cutoutDataUrl.split(',')[1], 'base64');
   const { data, info } = await sharp(cutoutBuffer)
-    .resize({ width: 96, height: 96, fit: 'inside', withoutEnlargement: true })
+    // Higher mesh source resolution reduces jagged silhouettes and missing hems.
+    .resize({ width: 160, height: 160, fit: 'inside', withoutEnlargement: true })
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
@@ -1406,7 +1835,17 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
 
   for (let index = 0; index < pixelCount; index += 1) {
     const alpha = data[index * channels + 3];
-    if (alpha > 24) {
+    const offset = index * channels;
+    const red = data[offset];
+    const green = data[offset + 1];
+    const blue = data[offset + 2];
+    const maxChannel = Math.max(red, green, blue);
+    const minChannel = Math.min(red, green, blue);
+    const saturation = maxChannel > 0 ? (maxChannel - minChannel) / maxChannel : 0;
+    const brightness = maxChannel / 255;
+    const lowConfidenceWhiteFringe = alpha < 136 && brightness >= 0.9 && saturation <= 0.11;
+
+    if (alpha > 56 && !lowConfidenceWhiteFringe) {
       mask[index] = 1;
       distance[index] = Number.POSITIVE_INFINITY;
       foregroundCount += 1;
@@ -1468,20 +1907,81 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
     }
   }
 
+  // Denoise sparse alpha fragments to avoid zipper-like mesh artifacts.
+  const cleanedMask = new Uint8Array(mask);
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const index = y * width + x;
+      if (!mask[index]) continue;
+
+      let neighbors = 0;
+      for (let oy = -1; oy <= 1; oy += 1) {
+        for (let ox = -1; ox <= 1; ox += 1) {
+          if (ox === 0 && oy === 0) continue;
+          if (mask[(y + oy) * width + (x + ox)]) neighbors += 1;
+        }
+      }
+      if (neighbors <= 1) {
+        cleanedMask[index] = 0;
+      }
+    }
+  }
+
   const frontVertexMap = new Int32Array(pixelCount).fill(-1);
   const backVertexMap = new Int32Array(pixelCount).fill(-1);
+  const boundaryMask = new Uint8Array(pixelCount);
   const positions = [];
   const uvs = [];
   const indices = [];
+  const panelIds = [];
+  const surfaceSides = [];
+  const pinnedVertices = [];
+  const stitchPairs = [];
+  const selfCollisionPairs = [];
+  const stitchPairKeys = new Set();
 
   const aspect = width / Math.max(1, height);
   const scaleY = 1.35;
   const scaleX = scaleY * aspect;
 
+  const seamBucketCount = 6;
+  const seamDepth = 0.007;
+
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
-      if (!mask[index]) continue;
+      if (!cleanedMask[index]) continue;
+
+      const isBoundary =
+        x === 0 ||
+        y === 0 ||
+        x === width - 1 ||
+        y === height - 1 ||
+        !cleanedMask[index - 1] ||
+        !cleanedMask[index + 1] ||
+        !cleanedMask[index - width] ||
+        !cleanedMask[index + width];
+
+      if (isBoundary) {
+        boundaryMask[index] = 1;
+      }
+    }
+  }
+
+  const addStitchPair = (first, second) => {
+    if (first < 0 || second < 0) return;
+    const min = Math.min(first, second);
+    const max = Math.max(first, second);
+    const key = `${min}:${max}`;
+    if (stitchPairKeys.has(key)) return;
+    stitchPairKeys.add(key);
+    stitchPairs.push(first, second);
+  };
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (!cleanedMask[index]) continue;
 
       const offset = index * channels;
       const red = data[offset];
@@ -1491,8 +1991,20 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
 
       const distanceNorm = Math.min(1, (distance[index] || 0) / Math.max(1, maxDistance));
       const wrinkle = (0.5 - luminance) * 0.02;
-      const frontZ = 0.018 + distanceNorm * 0.08 + wrinkle;
-      const backZ = -0.018 - distanceNorm * 0.05 + wrinkle * 0.35;
+
+      // Seam/panel effect: piecewise panel depth with a soft seam ridge between panels.
+      const panelU = x / Math.max(1, width - 1);
+      const panelIndex = Math.min(seamBucketCount - 1, Math.floor(panelU * seamBucketCount));
+      const panelCenter = (panelIndex + 0.5) / seamBucketCount;
+      const seamDistance = Math.abs(panelU - panelCenter) * seamBucketCount;
+      const seamRidge = Math.max(0, 1 - seamDistance * 1.8) * seamDepth;
+
+      // Slight drape sag towards the lower body to mimic cloth hanging.
+      const v = y / Math.max(1, height - 1);
+      const drapeSag = Math.pow(v, 1.8) * 0.018;
+
+      const frontZ = 0.02 + distanceNorm * 0.075 + wrinkle + seamRidge - drapeSag;
+      const backZ = -0.02 - distanceNorm * 0.048 + wrinkle * 0.35 + seamRidge * 0.4 - drapeSag * 0.7;
 
       const xNorm = (x / Math.max(1, width - 1) - 0.5) * 2;
       const yNorm = (0.5 - y / Math.max(1, height - 1)) * 2;
@@ -1503,11 +2015,23 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
       positions.push(px, py, frontZ);
       uvs.push(x / Math.max(1, width - 1), 1 - y / Math.max(1, height - 1));
       frontVertexMap[index] = frontIndex;
+      panelIds.push(panelIndex);
+      surfaceSides.push(0);
+      pinnedVertices.push(y <= Math.max(2, Math.round(height * 0.06)) || (boundaryMask[index] && y <= Math.round(height * 0.14)));
 
       const backIndex = positions.length / 3;
       positions.push(px, py, backZ);
-      uvs.push(x / Math.max(1, width - 1), 1 - y / Math.max(1, height - 1));
+      uvs.push(1 - (x / Math.max(1, width - 1)), 1 - y / Math.max(1, height - 1));
       backVertexMap[index] = backIndex;
+      panelIds.push(panelIndex + seamBucketCount);
+      surfaceSides.push(1);
+      pinnedVertices.push(y <= Math.max(2, Math.round(height * 0.06)) || (boundaryMask[index] && y <= Math.round(height * 0.14)));
+
+      selfCollisionPairs.push(frontIndex, backIndex);
+
+      if (boundaryMask[index]) {
+        addStitchPair(frontIndex, backIndex);
+      }
     }
   }
 
@@ -1541,6 +2065,84 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
       if (b10 >= 0 && b01 >= 0 && b11 >= 0) {
         indices.push(b10, b01, b11);
       }
+
+      if (cleanedMask[i00] && cleanedMask[i10] && (boundaryMask[i00] || boundaryMask[i10])) {
+        const f0 = frontVertexMap[i00];
+        const f1 = frontVertexMap[i10];
+        const b0 = backVertexMap[i00];
+        const b1 = backVertexMap[i10];
+        if (f0 >= 0 && f1 >= 0 && b0 >= 0 && b1 >= 0) {
+          indices.push(f0, f1, b1);
+          indices.push(f0, b1, b0);
+          addStitchPair(f0, b0);
+          addStitchPair(f1, b1);
+        }
+      }
+
+      if (cleanedMask[i00] && cleanedMask[i01] && (boundaryMask[i00] || boundaryMask[i01])) {
+        const f0 = frontVertexMap[i00];
+        const f1 = frontVertexMap[i01];
+        const b0 = backVertexMap[i00];
+        const b1 = backVertexMap[i01];
+        if (f0 >= 0 && f1 >= 0 && b0 >= 0 && b1 >= 0) {
+          indices.push(f0, b1, f1);
+          indices.push(f0, b0, b1);
+          addStitchPair(f0, b0);
+          addStitchPair(f1, b1);
+        }
+      }
+    }
+  }
+
+  const vertexCount = Math.floor(positions.length / 3);
+  if (vertexCount > 0 && indices.length >= 3) {
+    const adjacency = Array.from({ length: vertexCount }, () => new Set());
+    for (let tri = 0; tri < indices.length; tri += 3) {
+      const first = indices[tri];
+      const second = indices[tri + 1];
+      const third = indices[tri + 2];
+
+      adjacency[first].add(second);
+      adjacency[first].add(third);
+      adjacency[second].add(first);
+      adjacency[second].add(third);
+      adjacency[third].add(first);
+      adjacency[third].add(second);
+    }
+
+    const smoothIterations = 2;
+    const smoothAlpha = 0.18;
+    for (let iteration = 0; iteration < smoothIterations; iteration += 1) {
+      const next = positions.slice();
+      for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+        if (pinnedVertices[vertex]) continue;
+
+        const neighbors = adjacency[vertex];
+        if (!neighbors || neighbors.size === 0) continue;
+
+        let sumX = 0;
+        let sumY = 0;
+        let sumZ = 0;
+        for (const neighbor of neighbors) {
+          sumX += positions[neighbor * 3];
+          sumY += positions[neighbor * 3 + 1];
+          sumZ += positions[neighbor * 3 + 2];
+        }
+
+        const base = vertex * 3;
+        const invCount = 1 / neighbors.size;
+        const avgX = sumX * invCount;
+        const avgY = sumY * invCount;
+        const avgZ = sumZ * invCount;
+
+        next[base] = positions[base] * (1 - smoothAlpha) + avgX * smoothAlpha;
+        next[base + 1] = positions[base + 1] * (1 - smoothAlpha) + avgY * smoothAlpha;
+        next[base + 2] = positions[base + 2] * (1 - smoothAlpha) + avgZ * smoothAlpha;
+      }
+
+      for (let index = 0; index < positions.length; index += 1) {
+        positions[index] = next[index];
+      }
     }
   }
 
@@ -1550,7 +2152,15 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
     positions,
     uvs,
     indices,
+    panelIds,
+    surfaceSides,
+    pinnedVertices,
+    stitchPairs,
+    selfCollisionPairs,
     textureDataUrl: cutoutDataUrl,
+    seamPanelCount: seamBucketCount,
+    frontPanelCount: seamBucketCount,
+    backPanelCount: seamBucketCount,
     resolution: {
       width,
       height,
@@ -1564,7 +2174,124 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
 }
 
 async function createGarment3DModel(buffer, garmentType = 'shirt', mimeType = '') {
-  const cutoutResult = await createGarmentCutout(buffer, garmentType, mimeType);
+  let cutoutResult;
+  try {
+    cutoutResult = await createGarmentCutout(buffer, garmentType, mimeType);
+  } catch (error) {
+    console.warn('Primary background-removal cutout failed, trying heuristic cutout:', error.message);
+    try {
+      cutoutResult = await createHeuristicGarmentCutout(buffer);
+    } catch (heuristicError) {
+      console.warn('Heuristic cutout failed, trying color-key cutout:', heuristicError.message);
+      cutoutResult = await createColorKeyCutout(buffer);
+    }
+  }
+
+  try {
+    const sourceMeta = await sharp(buffer).rotate().metadata();
+    const sourceWidth = Number(sourceMeta?.width) || 0;
+    const sourceHeight = Number(sourceMeta?.height) || 0;
+    const sourceArea = sourceWidth * sourceHeight;
+
+    if (sourceArea > 0) {
+      const profile = getClothingShapeProfile(normalizeGarmentType(garmentType));
+      const minExpectedRatio = Math.max(0.02, Math.min(0.18, (profile?.minAreaRatio || 0.06) * 0.55));
+      const targetRatio = Math.max(minExpectedRatio, Math.min(0.65, Number(profile?.targetAreaRatio) || 0.24));
+      const maxExpectedRatio = 1.2;
+
+      const buildCandidate = (label, result) => {
+        const width = Number(result?.cutout?.width) || 0;
+        const height = Number(result?.cutout?.height) || 0;
+        const area = width * height;
+        const ratio = sourceArea > 0 ? area / sourceArea : 0;
+        return {
+          label,
+          result,
+          width,
+          height,
+          area,
+          ratio,
+        };
+      };
+
+      const scoreCandidate = (candidate) => {
+        if (!candidate || !candidate.area || candidate.area <= 0) {
+          return Number.POSITIVE_INFINITY;
+        }
+
+        const ratio = candidate.ratio;
+        const safeRatio = Math.max(1e-6, ratio);
+        let score = Math.abs(Math.log(safeRatio / Math.max(1e-6, targetRatio)));
+
+        if (ratio < minExpectedRatio) {
+          score += (minExpectedRatio - ratio) * 24;
+        }
+
+        if (ratio > maxExpectedRatio) {
+          score += (ratio - maxExpectedRatio) * 12;
+        }
+
+        // Slightly prefer the primary cutout when candidates are similar.
+        if (candidate.label === 'primary') {
+          score -= 0.08;
+        }
+
+        return score;
+      };
+
+      const candidates = [buildCandidate('primary', cutoutResult)];
+      const primaryRatio = candidates[0].ratio;
+
+      if (primaryRatio < minExpectedRatio || primaryRatio > (maxExpectedRatio + 0.12)) {
+        console.warn('Primary cutout ratio is out of expected range; evaluating fallback candidates.', {
+          garmentType,
+          ratio: Number(primaryRatio.toFixed(5)),
+          minExpectedRatio: Number(minExpectedRatio.toFixed(5)),
+          maxExpectedRatio,
+          cutout: { width: candidates[0].width, height: candidates[0].height },
+          source: { width: sourceWidth, height: sourceHeight },
+        });
+
+        try {
+          const heuristicCutout = await createHeuristicGarmentCutout(buffer);
+          candidates.push(buildCandidate('heuristic', heuristicCutout));
+        } catch (heuristicError) {
+          console.warn('Heuristic cutout candidate failed:', heuristicError.message);
+        }
+
+        try {
+          const colorKeyCutout = await createColorKeyCutout(buffer);
+          candidates.push(buildCandidate('color-key', colorKeyCutout));
+        } catch (colorKeyError) {
+          console.warn('Color-key cutout candidate failed:', colorKeyError.message);
+        }
+
+        const ranked = candidates
+          .map((candidate) => ({
+            ...candidate,
+            score: scoreCandidate(candidate),
+          }))
+          .sort((first, second) => first.score - second.score);
+
+        if (ranked.length > 0 && Number.isFinite(ranked[0].score)) {
+          cutoutResult = ranked[0].result;
+          console.warn('Selected cutout candidate after quality scoring.', {
+            garmentType,
+            selected: ranked[0].label,
+            selectedRatio: Number(ranked[0].ratio.toFixed(5)),
+            alternatives: ranked.map((entry) => ({
+              label: entry.label,
+              ratio: Number(entry.ratio.toFixed(5)),
+              score: Number(entry.score.toFixed(4)),
+            })),
+          });
+        }
+      }
+    }
+  } catch (qualityError) {
+    console.warn('Cutout quality validation failed:', qualityError.message);
+  }
+
   const cutoutDataUrl = cutoutResult?.pngDataUrl || null;
 
   if (cutoutDataUrl && cutoutDataUrl.startsWith('data:image/png;base64,')) {
@@ -1580,7 +2307,7 @@ async function createGarment3DModel(buffer, garmentType = 'shirt', mimeType = ''
     }
   }
 
-  const fallbackResult = await createApproxGarment3DModelFromCutout(buffer, garmentType, mimeType);
+  const fallbackResult = await createApproxGarment3DModelFromCutout(buffer, garmentType, mimeType, cutoutResult);
   return fallbackResult;
 }
 
