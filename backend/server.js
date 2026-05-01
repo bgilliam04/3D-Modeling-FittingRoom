@@ -817,8 +817,22 @@ function refineCutoutMask(rawImage, garmentType = 'shirt') {
   const data = new Uint8ClampedArray(source.length);
   data.set(source);
 
-  // Keep low-confidence interior pixels for darker fabrics while removing haze.
-  const alphaThreshold = 40;
+  // Detect average brightness of pixels that the model gave ANY confidence to.
+  // White/light garments get very low alpha confidence from the AI model, so we
+  // must lower the threshold for them or the entire mask ends up empty.
+  let brightSampleSum = 0;
+  let brightSampleCount = 0;
+  for (let i = 0; i < data.length; i += channels) {
+    if (data[i + 3] >= 10) {
+      brightSampleSum += (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+      brightSampleCount += 1;
+    }
+  }
+  const avgGarmentLuminance = brightSampleCount > 0 ? brightSampleSum / brightSampleCount : 128;
+  // For dark fabrics (luminance < 80) keep the normal threshold of 40 to suppress haze.
+  // For mid fabrics lower it to 20. For white/light fabrics (luminance >= 180) drop to 5
+  // so the low-confidence alpha the model assigns to white-on-white is not discarded.
+  const alphaThreshold = avgGarmentLuminance >= 180 ? 5 : avgGarmentLuminance >= 120 ? 15 : avgGarmentLuminance >= 80 ? 25 : 40;
   for (let i = 3; i < data.length; i += channels) {
     if (data[i] < alphaThreshold) {
       data[i] = 0;
@@ -1702,11 +1716,12 @@ async function refineGarmentCutoutWithSharp(cutoutBuffer, garmentType = 'shirt')
         const brightness = maxChannel / 255;
         // Only trim near-white fringe that is almost certainly background bleed
         // (very high brightness, near-zero saturation, semi-transparent).
-        const likelyBackgroundSpill = brightness >= 0.97 && saturation <= 0.04;
-
-        if (likelyBackgroundSpill && alpha < 140) {
-          nextMask[index] = 0;
-        }
+        // DISABLED for white garments: the assumption "near-white = background" breaks
+        // white and light-colored garments on white/light backgrounds.
+        // const likelyBackgroundSpill = brightness >= 0.97 && saturation <= 0.04;
+        // if (likelyBackgroundSpill && alpha < 140) {
+        //   nextMask[index] = 0;
+        // }
       }
     }
 
@@ -2387,11 +2402,12 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
     const minChannel = Math.min(red, green, blue);
     const saturation = maxChannel > 0 ? (maxChannel - minChannel) / maxChannel : 0;
     const brightness = maxChannel / 255;
-    // Reject: semi-transparent white fringe OR any near-white pixel the bg-removal missed.
-    const whiteFringe = brightness >= 0.88 && saturation <= 0.15;
+    // Reject: semi-transparent pixels but NOT near-white fringe.
+    // The assumption "brightness >= 0.88 && saturation <= 0.15 = background" breaks white garments.
+    // White pixels ARE the garment, not background, so keep them.
     const lowAlphaFringe = alpha < 128;
 
-    if (alpha > 0 && !lowAlphaFringe && !whiteFringe) {
+    if (alpha > 0 && !lowAlphaFringe) {
       mask[index] = 1;
       distance[index] = Number.POSITIVE_INFINITY;
       foregroundCount += 1;
@@ -3711,6 +3727,12 @@ function parseNumericValueFromToken(token) {
       return rawValue;
     }
 
+    // If OCR emitted a plain integer with too many digits, it likely dropped a decimal.
+    // Example: 18625 -> 18.625, 932625 -> 93.2625 (later sanity filtering may downscale more).
+    if (/^\d{5,}$/.test(normalizedToken)) {
+      return rawValue / Math.pow(10, normalizedToken.length - 2);
+    }
+
     // OCR often drops decimal separators in measurement tables (e.g. 365 -> 36.5).
     if (/^\d{3}$/.test(normalizedToken) && rawValue >= 120) {
       return rawValue / 10;
@@ -4002,21 +4024,57 @@ function extractSizesFromTableWords(ocrData) {
   let headerRowIndex = -1;
   let headerLabels = [];
 
+  // Helper to reconstruct malformed size labels (e.g., "X" + "L" → "XL", "2" + "X" + "L" → "2XL")
+  const reconstructSizeLabels = (tokens) => {
+    const merged = [];
+    for (let i = 0; i < tokens.length; i += 1) {
+      const current = tokens[i];
+      const currentText = String(current.text || '').trim().toUpperCase();
+      
+      // Check for "digit + X + L" pattern → "digitXL"
+      if (/^\d$/.test(currentText) && i + 2 < tokens.length) {
+        const nextText = String(tokens[i + 1].text || '').trim().toUpperCase();
+        const afterText = String(tokens[i + 2].text || '').trim().toUpperCase();
+        if (nextText === 'X' && afterText === 'L' && 
+            Math.abs(tokens[i + 1].cx - current.cx) < 25 &&
+            Math.abs(tokens[i + 2].cx - tokens[i + 1].cx) < 25) {
+          merged.push({ ...current, text: currentText + 'XL', isReconstructed: true });
+          i += 2;
+          continue;
+        }
+      }
+      
+      // Check for "X + L" pattern → "XL"
+      if (currentText === 'X' && i + 1 < tokens.length) {
+        const nextText = String(tokens[i + 1].text || '').trim().toUpperCase();
+        if (nextText === 'L' && Math.abs(tokens[i + 1].cx - current.cx) < 25) {
+          merged.push({ ...current, text: 'XL', isReconstructed: true });
+          i += 1;
+          continue;
+        }
+      }
+      
+      merged.push(current);
+    }
+    return merged;
+  };
+
   const headerMeasurementKeywords = ['CHEST', 'BUST', 'WAIST', 'BODY', 'WIDTH', 'LENGTH', 'HIP', 'INSEAM', 'SLEEVE', 'SHOULDER', 'NECK', 'RISE'];
   let bestHeaderCandidate = null;
 
   for (let index = 0; index < Math.min(rows.length, 8); index += 1) {
     const row = rows[index];
-    const sizeTokens = row.tokens.filter((token) => isSizeLabelToken(token.text));
-    const hasSizeWord = row.tokens.some((token) => token.text === 'SIZE');
+    const reconstructedTokens = reconstructSizeLabels(row.tokens);
+    const sizeTokens = reconstructedTokens.filter((token) => isSizeLabelToken(token.text));
+    const hasSizeWord = reconstructedTokens.some((token) => token.text === 'SIZE');
 
     if (sizeTokens.length < 2 && !(hasSizeWord && sizeTokens.length >= 1)) {
       continue;
     }
 
-    const rowText = row.tokens.map((token) => token.text).join(' ');
+    const rowText = reconstructedTokens.map((token) => token.text).join(' ');
     const hasMeasurementKeyword = headerMeasurementKeywords.some((keyword) => rowText.includes(keyword));
-    const nonSizeNonNumericCount = row.tokens.filter((token) => {
+    const nonSizeNonNumericCount = reconstructedTokens.filter((token) => {
       if (isSizeLabelToken(token.text)) {
         return false;
       }
@@ -4024,14 +4082,14 @@ function extractSizesFromTableWords(ocrData) {
       return parseNumericValueFromToken(token.text) === null;
     }).length;
 
-    const firstContentIndex = row.tokens.findIndex((token) => {
+    const firstContentIndex = reconstructedTokens.findIndex((token) => {
       if (isSizeLabelToken(token.text) || parseNumericValueFromToken(token.text) !== null) {
         return true;
       }
 
       return String(token.text || '').trim().length === 1;
     });
-    const candidateLabels = firstContentIndex === -1 ? sizeTokens : row.tokens.slice(firstContentIndex);
+    const candidateLabels = firstContentIndex === -1 ? sizeTokens : reconstructedTokens.slice(firstContentIndex);
 
     const score =
       sizeTokens.length * 4
@@ -4137,8 +4195,11 @@ function extractSizesFromTableWords(ocrData) {
     for (const row of dataRows) {
       if (row.tokens.length < 2) continue;
 
+      // Reconstruct malformed size labels before searching
+      const reconstructedRow = reconstructSizeLabels(row.tokens);
+      
       // Determine the size label: first token in the row that is a size label token
-      const sizeLabelToken = row.tokens.find((t) => isSizeLabelToken(t.text));
+      const sizeLabelToken = reconstructedRow.find((t) => isSizeLabelToken(t.text));
       if (!sizeLabelToken) continue;
       const sizeLabel = normalizeSizeLabel(sizeLabelToken.text);
       if (!sizeLabel) continue;
@@ -4170,7 +4231,7 @@ function extractSizesFromTableWords(ocrData) {
   // Keep one consistent size depiction row (e.g., XXS/XS/... or 00/0/2/...).
   // Some guides include both depictions on stacked rows; we intentionally use only
   // the first detected row to avoid mixing label styles.
-  const headerColumns = repairSizeHeaderColumns(headerLabels.map((token) => ({
+  let headerColumns = repairSizeHeaderColumns(headerLabels.map((token) => ({
     label: normalizeSizeLabel(token.text),
     x: token.cx,
   })));
@@ -4195,8 +4256,147 @@ function extractSizesFromTableWords(ocrData) {
     }
   }
 
-  const measurementKeywords = ['CHEST', 'BUST', 'WAIST', 'BODY', 'WIDTH', 'LENGTH', 'HIP', 'INSEAM'];
+  const measurementKeywords = ['CHEST', 'BUST', 'WAIST', 'BODY', 'WIDTH', 'LENGTH', 'HIP', 'INSEAM', 'SLEEVE'];
   const measurementSearchStart = headerRowIndex + depictionRowCount;
+
+  const canonicalAlphaLabel = (label) => {
+    const normalized = normalizeSizeLabel(label);
+    if (normalized === 'X') return 'XL';
+    if (normalized === 'XX') return 'XXL';
+    if (/^\d+X$/.test(normalized)) return `${normalized}L`;
+    if (normalized === '2XL') return 'XXL';
+    if (normalized === '3XL') return 'XXXL';
+    return normalized;
+  };
+
+  const isAmbiguousOcrSizeToken = (label) => {
+    const normalized = normalizeSizeLabel(label);
+    if (!normalized) return true;
+    return normalized === 'X' || normalized === 'XX' || /^\d+X$/.test(normalized);
+  };
+
+  const inferHeaderWindowLabels = (observedLabels, expectedCount) => {
+    const alphaSequence = ['XXXS', 'XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '4XL', '5XL', '6XL'];
+    if (expectedCount <= 0 || expectedCount > alphaSequence.length) {
+      return [];
+    }
+
+    let bestWindow = alphaSequence.slice(0, expectedCount);
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (let start = 0; start <= alphaSequence.length - expectedCount; start += 1) {
+      const candidate = alphaSequence.slice(start, start + expectedCount);
+      let score = 0;
+      for (let index = 0; index < expectedCount; index += 1) {
+        const observed = canonicalAlphaLabel(observedLabels[index] || '');
+        if (!observed) continue;
+        if (observed === candidate[index]) {
+          score += 3;
+        } else if (observed.includes('X') && candidate[index].includes('X')) {
+          score += 1;
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestWindow = candidate;
+      }
+    }
+
+    return bestWindow;
+  };
+
+  const disambiguateAlphaHeaderColumns = (columns) => {
+    const sorted = [...(columns || [])].sort((a, b) => a.x - b.x);
+    if (sorted.length < 3) {
+      return sorted;
+    }
+
+    const observed = sorted.map((column) => normalizeSizeLabel(column.label));
+    const hasAmbiguous = observed.some((label) => isAmbiguousOcrSizeToken(label));
+    const anchoredCount = observed.filter((label) => label && !isAmbiguousOcrSizeToken(label)).length;
+    if (!hasAmbiguous || anchoredCount < 2) {
+      return sorted;
+    }
+
+    const inferred = inferHeaderWindowLabels(observed, observed.length);
+    return sorted.map((column, index) => ({
+      ...column,
+      label: normalizeSizeLabel(
+        isAmbiguousOcrSizeToken(observed[index])
+          ? (inferred[index] || canonicalAlphaLabel(observed[index]) || observed[index] || '')
+          : observed[index]
+      ),
+    }));
+  };
+
+  const getRowNumericCells = (row) => {
+    if (!row) return [];
+    return row.tokens
+      .map((token) => ({ x: token.cx, value: parseNumericValueFromToken(token.text) }))
+      .filter((cell) => Number.isFinite(cell.value))
+      .sort((a, b) => a.x - b.x);
+  };
+
+  // Recover dropped size columns when OCR header misses labels (e.g., XS S " L X X).
+  // We infer expected column count from measurement rows and align header columns to them.
+  const recoverHeaderColumns = (columns, rowsForInference) => {
+    const sortedColumns = [...(columns || [])].sort((a, b) => a.x - b.x);
+    if (sortedColumns.length === 0) return sortedColumns;
+
+    let bestNumericCells = [];
+    for (const row of rowsForInference) {
+      const rowText = row.tokens.map((token) => token.text).join(' ');
+      const hasKeyword = measurementKeywords.some((keyword) => rowText.includes(keyword));
+      if (!hasKeyword) continue;
+      const numericCells = getRowNumericCells(row);
+      if (numericCells.length > bestNumericCells.length) {
+        bestNumericCells = numericCells;
+      }
+    }
+
+    const expectedCount = bestNumericCells.length;
+    if (expectedCount <= sortedColumns.length || expectedCount < 3) {
+      return sortedColumns;
+    }
+
+    const inferredXs = bestNumericCells.map((cell) => cell.x);
+    const observedLabels = new Array(expectedCount).fill('');
+    const typicalGap = inferredXs.length > 1
+      ? Math.max(18, Math.min(...inferredXs.slice(1).map((x, i) => x - inferredXs[i])) * 0.45)
+      : 24;
+
+    for (let index = 0; index < expectedCount; index += 1) {
+      const targetX = inferredXs[index];
+      let nearest = null;
+      let nearestDistance = Infinity;
+      for (const column of sortedColumns) {
+        const distance = Math.abs(column.x - targetX);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearest = column;
+        }
+      }
+      if (nearest && nearestDistance <= typicalGap) {
+        observedLabels[index] = nearest.label;
+      }
+    }
+
+    const inferredLabels = inferHeaderWindowLabels(observedLabels, expectedCount);
+    const expanded = inferredXs.map((x, index) => ({
+      // Prefer inferred label for ambiguous OCR tokens so columns like X X map to XL XXL.
+      x,
+      label: normalizeSizeLabel(
+        isAmbiguousOcrSizeToken(observedLabels[index])
+          ? (inferredLabels[index] || canonicalAlphaLabel(observedLabels[index]) || observedLabels[index] || '')
+          : (observedLabels[index] || inferredLabels[index] || '')
+      ),
+    }));
+
+    return repairSizeHeaderColumns(expanded);
+  };
+
+  headerColumns = recoverHeaderColumns(headerColumns, rows.slice(measurementSearchStart));
+  headerColumns = repairSizeHeaderColumns(disambiguateAlphaHeaderColumns(headerColumns));
 
   const headerMinX = headerColumns.reduce((min, column) => Math.min(min, column.x), Number.POSITIVE_INFINITY);
   const minExpectedNumericCells = Math.max(2, Math.floor(headerColumns.length * 0.5));
@@ -4206,7 +4406,8 @@ function extractSizesFromTableWords(ocrData) {
       .filter((token) => parseNumericValueFromToken(token.text) === null)
       .filter((token) => token.cx <= headerMinX + 8)
       .map((token) => token.text)
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((token) => token.toUpperCase() !== 'NA' && token !== 'NA');
 
     let measurementType = nonNumericLeftTokens.join(' ').replace(/\s+/g, ' ').trim();
     if (!measurementType) {
@@ -4215,19 +4416,65 @@ function extractSizesFromTableWords(ocrData) {
       measurementType = keyword || 'MEASUREMENT';
     }
 
+    // Normalize common OCR misreadings
+    measurementType = measurementType
+      .replace(/STEEVE/gi, 'SLEEVE')
+      .replace(/BODYLENGTH/gi, 'LENGTH')
+      .replace(/BODYWIDTH/gi, 'WIDTH');
+
     return measurementType.slice(0, 64).trim() || 'MEASUREMENT';
   };
 
   const mapSizeValuesForRow = (row, measurementType) => {
-    const assignedValues = assignRowCellsToColumns(row, headerColumns);
+    let effectiveColumns = repairSizeHeaderColumns(disambiguateAlphaHeaderColumns(headerColumns));
+    const numericCells = getRowNumericCells(row);
 
-    if (assignedValues.size < minExpectedNumericCells) {
+    // If a measurement row contains more numeric columns than the parsed header,
+    // recover the missing header columns from row geometry and infer labels.
+    if (numericCells.length > headerColumns.length && headerColumns.length >= 2) {
+      const observed = new Array(numericCells.length).fill('');
+      const nearestLimit = numericCells.length > 1
+        ? Math.max(18, Math.min(...numericCells.slice(1).map((cell, i) => cell.x - numericCells[i].x)) * 0.45)
+        : 24;
+
+      for (let index = 0; index < numericCells.length; index += 1) {
+        const targetX = numericCells[index].x;
+        let nearest = null;
+        let nearestDistance = Infinity;
+        for (const column of headerColumns) {
+          const distance = Math.abs(column.x - targetX);
+          if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearest = column;
+          }
+        }
+        if (nearest && nearestDistance <= nearestLimit) {
+          observed[index] = nearest.label;
+        }
+      }
+
+      const inferredLabels = inferHeaderWindowLabels(observed, numericCells.length);
+      effectiveColumns = repairSizeHeaderColumns(numericCells.map((cell, index) => ({
+        x: cell.x,
+        label: normalizeSizeLabel(
+          isAmbiguousOcrSizeToken(observed[index])
+            ? (inferredLabels[index] || canonicalAlphaLabel(observed[index]) || observed[index] || '')
+            : (observed[index] || inferredLabels[index] || '')
+        ),
+      })));
+      effectiveColumns = repairSizeHeaderColumns(disambiguateAlphaHeaderColumns(effectiveColumns));
+    }
+
+    const assignedValues = assignRowCellsToColumns(row, effectiveColumns);
+
+    const dynamicMinExpected = Math.max(2, Math.floor(effectiveColumns.length * 0.5));
+    if (assignedValues.size < dynamicMinExpected) {
       return [];
     }
 
     const mapped = [];
-    for (let columnIndex = 0; columnIndex < headerColumns.length; columnIndex += 1) {
-      const column = headerColumns[columnIndex];
+    for (let columnIndex = 0; columnIndex < effectiveColumns.length; columnIndex += 1) {
+      const column = effectiveColumns[columnIndex];
       const sizeLabel = normalizeSizeLabel(column.label);
       const assignedValue = assignedValues.get(columnIndex);
       if (!sizeLabel || !assignedValue) {
@@ -4431,8 +4678,48 @@ function buildFallbackSizes(garmentType, observedText) {
 }
 
 function normalizeNumericGuideValues(sizes) {
+  const sanitizeMeasurementValue = (rawValue, measurementType = '') => {
+    let value = Number(rawValue);
+    if (!Number.isFinite(value) || value <= 0) {
+      return null;
+    }
+
+    const type = String(measurementType || '').toUpperCase();
+    const isLengthLike = /(LENGTH|SLEEVE|INSEAM|RISE|OUTSEAM|SHOULDER)/.test(type);
+    const minAllowed = isLengthLike ? 4 : 3;
+    const maxAllowed = isLengthLike ? 80 : 80;
+
+    // OCR may produce compacted values (e.g. 9326.25 instead of 9.32625 or 93.2625).
+    // Iteratively scale down until value falls in a plausible garment-measurement range.
+    while (value > maxAllowed * 10) {
+      value /= 10;
+    }
+    while (value > maxAllowed) {
+      value /= 10;
+    }
+
+    if (value < minAllowed || value > maxAllowed) {
+      return null;
+    }
+
+    return Number.parseFloat(value.toFixed(3));
+  };
+
   if ((sizes || []).some((size) => size?.measurementType)) {
-    return sortSizes(dedupeSizes(sizes || []));
+    const sanitized = (sizes || [])
+      .map((size) => {
+        const safeValue = sanitizeMeasurementValue(size?.value, size?.measurementType);
+        if (!Number.isFinite(safeValue)) {
+          return null;
+        }
+        return {
+          ...size,
+          value: safeValue,
+        };
+      })
+      .filter(Boolean);
+
+    return sortSizes(dedupeSizes(sanitized));
   }
 
   const ordered = sortSizes(dedupeSizes(sizes || []));
@@ -4623,8 +4910,280 @@ async function parseSizeGuideImage(file, garmentType = '') {
   }
 
   const normalized = normalizeNumericGuideValues(sizes);
-  console.log('Final parsed sizes:', normalized);
-  return normalized;
+  
+  // Post-process to fix incomplete size labels that OCR mangled (e.g., bare "X" should be "XL", "2X" should be "2XL")
+  let fixedSizes = normalized.map((size) => {
+    let label = size.label || '';
+    
+    // Fix bare "X" -> "XL" (common OCR error)
+    if (label === 'X') {
+      label = 'XL';
+    }
+    // Fix "2X" -> "2XL", "3X" -> "3XL", etc
+    else if (/^\d+X$/.test(label)) {
+      label = label + 'L';
+    }
+    // Fix "XX" -> "XXL"
+    else if (label === 'XX') {
+      label = 'XXL';
+    }
+    
+    const normalized_label = normalizeSizeLabel(label);
+    return { ...size, label: normalized_label, sizeLabel: normalized_label };
+  });
+  
+  // Infer missing size labels from known progressions
+  const inferMissingSizes = (sizeList) => {
+    // Do not synthesize rows for measurement tables (WIDTH/LENGTH/SLEEVE, etc.).
+    // Those tables contain multiple measurement types per size, and inferring on the
+    // flattened list can cross-wire values and create extreme garbage values.
+    if ((sizeList || []).some((s) => s?.measurementType)) {
+      return sizeList;
+    }
+
+    const labels = sizeList.map((s) => s.label);
+    const knownSequences = [
+      ['XXXS', 'XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'],
+      ['XS', 'S', 'M', 'L', 'XL', 'XXL'],
+      ['S', 'M', 'L', 'XL'],
+      ['0', '2', '4', '6', '8', '10', '12', '14', '16', '18', '20'],
+    ];
+    
+    // Find which sequence best matches the detected labels
+    let bestSequence = null;
+    let bestMatchCount = 0;
+    for (const seq of knownSequences) {
+      let matchCount = 0;
+      for (const label of labels) {
+        if (seq.includes(label)) matchCount += 1;
+      }
+      if (matchCount > bestMatchCount) {
+        bestMatchCount = matchCount;
+        bestSequence = seq;
+      }
+    }
+    
+    if (!bestSequence || bestMatchCount < 2) {
+      return sizeList;
+    }
+    
+    // Find positions of detected labels in the best sequence
+    const positions = [];
+    for (const label of labels) {
+      const pos = bestSequence.indexOf(label);
+      if (pos >= 0) positions.push(pos);
+    }
+    
+    if (positions.length < 2) return sizeList;
+    
+    // Check for gaps and fill them in with interpolated values
+    const minPos = Math.min(...positions);
+    const maxPos = Math.max(...positions);
+    const expected = bestSequence.slice(minPos, maxPos + 1);
+    
+    // Build map of existing labels
+    const existingMap = new Map();
+    for (const size of sizeList) {
+      existingMap.set(size.label, size);
+    }
+    
+    // Add missing labels with interpolated values
+    const inferred = [...sizeList];
+    for (let i = 0; i < expected.length; i += 1) {
+      const expectedLabel = expected[i];
+      if (!existingMap.has(expectedLabel)) {
+        // Interpolate value between neighbors
+        let value = 12 + i * 2; // fallback
+        const prevIdx = i - 1;
+        const nextIdx = i + 1;
+        if (prevIdx >= 0 && nextIdx < expected.length) {
+          const prevLabel = expected[prevIdx];
+          const nextLabel = expected[nextIdx];
+          const prevSize = existingMap.get(prevLabel);
+          const nextSize = existingMap.get(nextLabel);
+          if (prevSize?.value && nextSize?.value) {
+            value = (prevSize.value + nextSize.value) / 2;
+          }
+        }
+        inferred.push({ label: expectedLabel, value, measurementType: sizeList[0]?.measurementType });
+        existingMap.set(expectedLabel, { label: expectedLabel, value });
+      }
+    }
+    
+    return sortSizes(inferred);
+  };
+  
+  fixedSizes = inferMissingSizes(fixedSizes);
+
+  const repairDuplicateXLAsXXL = (sizeList) => {
+    const list = Array.isArray(sizeList) ? [...sizeList] : [];
+    if (list.length === 0) return list;
+
+    const groups = new Map();
+    for (let index = 0; index < list.length; index += 1) {
+      const measurementType = String(list[index]?.measurementType || '').toUpperCase().trim() || '__NO_TYPE__';
+      if (!groups.has(measurementType)) groups.set(measurementType, []);
+      groups.get(measurementType).push({ index, entry: list[index] });
+    }
+
+    for (const [, group] of groups) {
+      const labels = group.map(({ entry }) => normalizeSizeLabel(entry?.label || entry?.sizeLabel || ''));
+      const hasXXL = labels.some((label) => label === 'XXL' || label === '2XL');
+      if (hasXXL) continue;
+
+      const hasCoreRun = ['XS', 'S', 'M', 'L'].every((needed) => labels.includes(needed));
+      if (!hasCoreRun) continue;
+
+      const xlLike = group
+        .map(({ index, entry }) => ({
+          index,
+          label: normalizeSizeLabel(entry?.label || entry?.sizeLabel || ''),
+          value: Number(entry?.value),
+        }))
+        .filter((item) => item.label === 'XL' || item.label === 'X' || item.label === 'XX' || item.label === '2X' || item.label === '2XL')
+        .filter((item) => Number.isFinite(item.value));
+
+      if (xlLike.length < 2) continue;
+
+      xlLike.sort((a, b) => a.value - b.value);
+      const xlCandidate = xlLike[xlLike.length - 2];
+      const xxlCandidate = xlLike[xlLike.length - 1];
+
+      const xlEntry = list[xlCandidate.index];
+      const xxlEntry = list[xxlCandidate.index];
+
+      list[xlCandidate.index] = {
+        ...xlEntry,
+        label: 'XL',
+        sizeLabel: 'XL',
+      };
+      list[xxlCandidate.index] = {
+        ...xxlEntry,
+        label: 'XXL',
+        sizeLabel: 'XXL',
+      };
+    }
+
+    return list;
+  };
+
+  fixedSizes = repairDuplicateXLAsXXL(fixedSizes);
+
+  // Final hard guard against OCR outliers that can explode frontend scaling.
+  fixedSizes = (fixedSizes || [])
+    .map((size) => {
+      const v = Number(size?.value);
+      if (!Number.isFinite(v) || v <= 0) return null;
+
+      const isLengthLike = /(LENGTH|SLEEVE|INSEAM|RISE|OUTSEAM|SHOULDER)/.test(String(size?.measurementType || '').toUpperCase());
+      const minAllowed = isLengthLike ? 4 : 3;
+      const maxAllowed = 80;
+
+      let value = v;
+      while (value > maxAllowed * 10) value /= 10;
+      while (value > maxAllowed) value /= 10;
+
+      if (value < minAllowed || value > maxAllowed) return null;
+      return { ...size, value: Number.parseFloat(value.toFixed(3)) };
+    })
+    .filter(Boolean);
+
+  const normalizeSizeRankLabel = (label) => {
+    const normalized = normalizeSizeLabel(label);
+    if (normalized === '2XL') return 'XXL';
+    if (normalized === '3XL') return 'XXXL';
+    if (normalized === '4XL' || normalized === '5XL' || normalized === '6XL') return normalized;
+    return normalized;
+  };
+
+  const correctMeasurementTrendOutliers = (sizeList) => {
+    const ranks = {
+      XXXS: 0,
+      XXS: 1,
+      XS: 2,
+      S: 3,
+      M: 4,
+      L: 5,
+      XL: 6,
+      XXL: 7,
+      XXXL: 8,
+      '4XL': 9,
+      '5XL': 10,
+      '6XL': 11,
+    };
+
+    const grouped = new Map();
+    for (let i = 0; i < sizeList.length; i += 1) {
+      const entry = sizeList[i];
+      const type = String(entry?.measurementType || '').toUpperCase().trim() || '__NO_TYPE__';
+      const rankLabel = normalizeSizeRankLabel(entry?.sizeLabel || entry?.label || '');
+      const rank = Object.prototype.hasOwnProperty.call(ranks, rankLabel) ? ranks[rankLabel] : null;
+      const value = Number(entry?.value);
+      if (!Number.isFinite(value) || rank === null) continue;
+      if (!grouped.has(type)) grouped.set(type, []);
+      grouped.get(type).push({ index: i, rank, value });
+    }
+
+    const corrected = [...sizeList];
+
+    for (const [, points] of grouped) {
+      if (points.length < 3) continue;
+      points.sort((a, b) => a.rank - b.rank);
+
+      // Estimate a typical positive step for this measurement type.
+      const steps = [];
+      for (let i = 1; i < points.length; i += 1) {
+        const dr = points[i].rank - points[i - 1].rank;
+        if (dr <= 0) continue;
+        const step = (points[i].value - points[i - 1].value) / dr;
+        if (step >= 0 && step <= 4.5) {
+          steps.push(step);
+        }
+      }
+      const sortedSteps = [...steps].sort((a, b) => a - b);
+      const typicalStep = sortedSteps.length
+        ? sortedSteps[Math.floor(sortedSteps.length / 2)]
+        : 0.9;
+      const minStep = Math.max(0.35, typicalStep * 0.35);
+
+      // Enforce non-decreasing progression by size rank and repair obvious jumps.
+      let prevValue = points[0].value;
+      for (let i = 1; i < points.length; i += 1) {
+        const current = points[i];
+        const dr = Math.max(1, current.rank - points[i - 1].rank);
+        let nextValue = current.value;
+
+        const lowerBound = prevValue - 0.15;
+        const upperBound = prevValue + Math.max(8, typicalStep * 6) * dr;
+
+        if (nextValue < lowerBound) {
+          nextValue = prevValue + minStep * dr;
+        } else if (nextValue > upperBound) {
+          nextValue = prevValue + Math.max(minStep, typicalStep) * dr;
+        }
+
+        if (nextValue < prevValue) {
+          nextValue = prevValue;
+        }
+
+        if (Math.abs(nextValue - current.value) > 0.001) {
+          corrected[current.index] = {
+            ...corrected[current.index],
+            value: Number.parseFloat(nextValue.toFixed(3)),
+          };
+        }
+
+        prevValue = Number(corrected[current.index]?.value ?? nextValue);
+      }
+    }
+
+    return corrected;
+  };
+
+  fixedSizes = correctMeasurementTrendOutliers(fixedSizes);
+  
+  console.log('Final parsed sizes:', fixedSizes);
+  return fixedSizes;
 }
 
 app.post('/upload-scan', upload.single('model'), (req, res) => {
