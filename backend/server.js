@@ -72,7 +72,8 @@ async function removeBackgroundWithSilentWorker(orientedBuffer) {
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const PORT = process.env.PORT || 4000;
-const GARMENT_PIPELINE_VERSION = '2026-04-29-seam-cutout-v3';
+const GARMENT_PIPELINE_VERSION = '2026-05-12-fast-preview-v1';
+const GARMENT_FAST_PREVIEW = process.env.GARMENT_FAST_PREVIEW !== '0';
 const XCLOTH_INFER_URL = process.env.XCLOTH_INFER_URL || 'http://127.0.0.1:8008/infer';
 const XCLOTH_TIMEOUT_MS = Number.parseInt(process.env.XCLOTH_TIMEOUT_MS || '25000', 10);
 
@@ -2038,6 +2039,15 @@ function normalizeServiceGarmentModel(model, fallbackTextureDataUrl = null) {
   return null;
 }
 
+function getMeshResolutionForGarment(garmentType = 'shirt') {
+  const type = normalizeGarmentType(garmentType || 'shirt');
+  const fastScale = GARMENT_FAST_PREVIEW ? 1 : 0;
+  if (type === 'shirt' || type === 'tshirt' || type === 'blouse' || type === 'jacket' || type === 'hoodie' || type === 'sweater' || type === 'suit' || type === 'coat') return fastScale ? 104 : 160;
+  if (type === 'pants' || type === 'jeans' || type === 'shorts' || type === 'skirt') return fastScale ? 84 : 112;
+  if (type === 'dress' || type === 'jumpsuit' || type === 'romper') return fastScale ? 96 : 128;
+  return fastScale ? 72 : 96;
+}
+
 async function inferGarment3DWithXClothService(inputBuffer, garmentType, mimeType, cutoutDataUrl = null) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Math.max(5000, XCLOTH_TIMEOUT_MS));
@@ -2425,6 +2435,8 @@ function carveNeckOpening(mask, width, height, garmentType = 'shirt') {
 async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt', mimeType = '', existingCutoutResult = null) {
   const cutoutResult = existingCutoutResult || await createGarmentCutout(buffer, garmentType, mimeType);
   const cutoutDataUrl = cutoutResult?.pngDataUrl || null;
+  const meshResolution = getMeshResolutionForGarment(garmentType);
+  const fastPreview = GARMENT_FAST_PREVIEW;
 
   if (!cutoutDataUrl || !cutoutDataUrl.startsWith('data:image/png;base64,')) {
     return {
@@ -2435,8 +2447,8 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
 
   const cutoutBuffer = Buffer.from(cutoutDataUrl.split(',')[1], 'base64');
   const { data, info } = await sharp(cutoutBuffer)
-    // Higher mesh source resolution reduces jagged silhouettes and missing hems.
-    .resize({ width: 160, height: 160, fit: 'inside', withoutEnlargement: true })
+    // Keep fallback meshes light enough for real-time cloth simulation in browser.
+    .resize({ width: meshResolution, height: meshResolution, fit: 'inside', withoutEnlargement: true })
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
@@ -2460,6 +2472,23 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
   let queueEnd = 0;
   let foregroundCount = 0;
 
+  // Estimate garment brightness to keep more low-alpha interior on light fabrics.
+  let lumaSum = 0;
+  let lumaCount = 0;
+  for (let index = 0; index < pixelCount; index += 1) {
+    const alpha = data[index * channels + 3];
+    if (alpha <= 0) continue;
+    const offset = index * channels;
+    const red = data[offset];
+    const green = data[offset + 1];
+    const blue = data[offset + 2];
+    const luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    lumaSum += luma;
+    lumaCount += 1;
+  }
+  const avgGarmentLuma = lumaCount > 0 ? lumaSum / lumaCount : 128;
+  const alphaRejectThreshold = avgGarmentLuma >= 190 ? 3 : (avgGarmentLuma >= 150 ? 8 : (avgGarmentLuma >= 100 ? 16 : 24));
+
   for (let index = 0; index < pixelCount; index += 1) {
     const alpha = data[index * channels + 3];
     const offset = index * channels;
@@ -2470,12 +2499,12 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
     const minChannel = Math.min(red, green, blue);
     const saturation = maxChannel > 0 ? (maxChannel - minChannel) / maxChannel : 0;
     const brightness = maxChannel / 255;
-    // Reject: near-fully-transparent pixels only (alpha < 32).
+    // Reject only ultra-low-alpha fringe; keep low-confidence interior for light garments.
     // Dark fabrics (denim, dark denim) are often returned with alpha 50-127 by the
     // background-removal model because it's uncertain. Keeping them fills the interior
     // of the silhouette instead of creating holes. The denoising / component-selection
     // passes downstream remove any stray background specks.
-    const lowAlphaFringe = alpha < 32;
+    const lowAlphaFringe = alpha < alphaRejectThreshold;
 
     if (alpha > 0 && !lowAlphaFringe) {
       mask[index] = 1;
@@ -2599,6 +2628,48 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
       if (!cleanedMask[i] && !exteriorReached[i]) {
         cleanedMask[i] = 1;
       }
+    }
+  }
+
+  // Pre-connect fragmented top-garment contours so component filtering does not
+  // collapse to tiny islands when alpha cutouts are broken into sparse segments.
+  {
+    const normalizedTypeForPreConnect = normalizeGarmentType(garmentType);
+    const isTopGarmentForPreConnect = normalizedTypeForPreConnect === 'shirt'
+      || normalizedTypeForPreConnect === 'tshirt'
+      || normalizedTypeForPreConnect === 'blouse'
+      || normalizedTypeForPreConnect === 'jacket'
+      || normalizedTypeForPreConnect === 'hoodie'
+      || normalizedTypeForPreConnect === 'sweater'
+      || normalizedTypeForPreConnect === 'coat'
+      || normalizedTypeForPreConnect === 'suit';
+
+    if (isTopGarmentForPreConnect) {
+      const bridged = new Uint8Array(cleanedMask);
+      for (let y = 1; y < height - 1; y += 1) {
+        for (let x = 1; x < width - 1; x += 1) {
+          const index = y * width + x;
+          if (cleanedMask[index]) continue;
+
+          const left = cleanedMask[index - 1] ? 1 : 0;
+          const right = cleanedMask[index + 1] ? 1 : 0;
+          const up = cleanedMask[index - width] ? 1 : 0;
+          const down = cleanedMask[index + width] ? 1 : 0;
+          const ul = cleanedMask[index - width - 1] ? 1 : 0;
+          const ur = cleanedMask[index - width + 1] ? 1 : 0;
+          const dl = cleanedMask[index + width - 1] ? 1 : 0;
+          const dr = cleanedMask[index + width + 1] ? 1 : 0;
+
+          const orth = left + right + up + down;
+          const diag = ul + ur + dl + dr;
+          const horizontalBridge = left && right;
+          const verticalBridge = up && down;
+          if (horizontalBridge || verticalBridge || orth >= 3 || (orth >= 2 && diag >= 2)) {
+            bridged[index] = 1;
+          }
+        }
+      }
+      cleanedMask.set(bridged);
     }
   }
 
@@ -2908,6 +2979,193 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
     }
   }
 
+  // If a top garment mask is contour-like (mostly boundary pixels), promote it
+  // to a solid silhouette via scanline fill before triangulation.
+  const normalizedTypeForSolidFill = normalizeGarmentType(garmentType);
+  const isTopGarmentForSolidFill = normalizedTypeForSolidFill === 'shirt'
+    || normalizedTypeForSolidFill === 'tshirt'
+    || normalizedTypeForSolidFill === 'blouse'
+    || normalizedTypeForSolidFill === 'jacket'
+    || normalizedTypeForSolidFill === 'hoodie'
+    || normalizedTypeForSolidFill === 'sweater'
+    || normalizedTypeForSolidFill === 'coat'
+    || normalizedTypeForSolidFill === 'suit';
+
+  if (isTopGarmentForSolidFill) {
+    let minX = width;
+    let maxX = -1;
+    let minY = height;
+    let maxY = -1;
+    let fgCount = 0;
+    let boundaryLikeCount = 0;
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const idx = y * width + x;
+        if (!cleanedMask[idx]) continue;
+        fgCount += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+
+        const isBoundaryLike =
+          x === 0 || y === 0 || x === width - 1 || y === height - 1 ||
+          !cleanedMask[idx - 1] || !cleanedMask[idx + 1] ||
+          !cleanedMask[idx - width] || !cleanedMask[idx + width];
+        if (isBoundaryLike) boundaryLikeCount += 1;
+      }
+    }
+
+    const boundaryRatio = fgCount > 0 ? boundaryLikeCount / fgCount : 0;
+    const bboxArea = (maxX > minX && maxY > minY) ? ((maxX - minX + 1) * (maxY - minY + 1)) : 0;
+    const fillDensity = bboxArea > 0 ? (fgCount / bboxArea) : 0;
+    const needsInteriorFill = boundaryRatio >= 0.72 || fillDensity <= 0.42;
+    if (fgCount > 0 && needsInteriorFill && maxX > minX && maxY > minY) {
+      const filledMask = new Uint8Array(cleanedMask);
+
+      // Horizontal bridge fill
+      for (let y = minY; y <= maxY; y += 1) {
+        let firstX = -1;
+        let lastX = -1;
+        for (let x = minX; x <= maxX; x += 1) {
+          if (!cleanedMask[y * width + x]) continue;
+          if (firstX < 0) firstX = x;
+          lastX = x;
+        }
+        if (firstX >= 0 && lastX > firstX + 1) {
+          for (let x = firstX; x <= lastX; x += 1) {
+            filledMask[y * width + x] = 1;
+          }
+        }
+      }
+
+      // Vertical bridge fill
+      for (let x = minX; x <= maxX; x += 1) {
+        let firstY = -1;
+        let lastY = -1;
+        for (let y = minY; y <= maxY; y += 1) {
+          if (!filledMask[y * width + x]) continue;
+          if (firstY < 0) firstY = y;
+          lastY = y;
+        }
+        if (firstY >= 0 && lastY > firstY + 1) {
+          for (let y = firstY; y <= lastY; y += 1) {
+            filledMask[y * width + x] = 1;
+          }
+        }
+      }
+
+      cleanedMask.set(filledMask);
+    }
+
+    // Final top-garment solidification: preserve the silhouette envelope while
+    // guaranteeing interior coverage so triangulation yields full panel faces.
+    if (maxX > minX && maxY > minY) {
+      // Horizontal span fill per row (keeps the row-wise outer contour intact).
+      for (let y = minY; y <= maxY; y += 1) {
+        let firstX = -1;
+        let lastX = -1;
+        for (let x = minX; x <= maxX; x += 1) {
+          if (!cleanedMask[y * width + x]) continue;
+          if (firstX < 0) firstX = x;
+          lastX = x;
+        }
+        if (firstX >= 0 && lastX >= firstX) {
+          for (let x = firstX; x <= lastX; x += 1) {
+            cleanedMask[y * width + x] = 1;
+          }
+        }
+      }
+
+      // Vertical span fill per column to close residual slit-like voids.
+      for (let x = minX; x <= maxX; x += 1) {
+        let firstY = -1;
+        let lastY = -1;
+        for (let y = minY; y <= maxY; y += 1) {
+          if (!cleanedMask[y * width + x]) continue;
+          if (firstY < 0) firstY = y;
+          lastY = y;
+        }
+        if (firstY >= 0 && lastY >= firstY) {
+          for (let y = firstY; y <= lastY; y += 1) {
+            cleanedMask[y * width + x] = 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Hard recovery for top garments: if cleaned mask coverage collapses compared
+  // to raw alpha coverage, rebuild from raw alpha and span-fill to recover a full panel.
+  {
+    const normalizedTypeForRecovery = normalizeGarmentType(garmentType);
+    const isTopGarmentForRecovery = normalizedTypeForRecovery === 'shirt'
+      || normalizedTypeForRecovery === 'tshirt'
+      || normalizedTypeForRecovery === 'blouse'
+      || normalizedTypeForRecovery === 'jacket'
+      || normalizedTypeForRecovery === 'hoodie'
+      || normalizedTypeForRecovery === 'sweater'
+      || normalizedTypeForRecovery === 'coat'
+      || normalizedTypeForRecovery === 'suit';
+
+    if (isTopGarmentForRecovery) {
+      let cleanedCount = 0;
+      for (let i = 0; i < pixelCount; i += 1) {
+        if (cleanedMask[i]) cleanedCount += 1;
+      }
+
+      let rawAlphaCount = 0;
+      const rawMask = new Uint8Array(pixelCount);
+      for (let i = 0; i < pixelCount; i += 1) {
+        const alpha = data[i * channels + 3];
+        if (alpha > 0) {
+          rawMask[i] = 1;
+          rawAlphaCount += 1;
+        }
+      }
+
+      const coverageRatio = rawAlphaCount > 0 ? (cleanedCount / rawAlphaCount) : 1;
+      if (rawAlphaCount > 0 && (cleanedCount < 1200 || coverageRatio < 0.45)) {
+        const recoveredMask = new Uint8Array(rawMask);
+
+        // Row span fill from raw alpha to restore interior.
+        for (let y = 0; y < height; y += 1) {
+          let firstX = -1;
+          let lastX = -1;
+          for (let x = 0; x < width; x += 1) {
+            if (!rawMask[y * width + x]) continue;
+            if (firstX < 0) firstX = x;
+            lastX = x;
+          }
+          if (firstX >= 0 && lastX >= firstX) {
+            for (let x = firstX; x <= lastX; x += 1) {
+              recoveredMask[y * width + x] = 1;
+            }
+          }
+        }
+
+        // Column span fill to close slit artifacts.
+        for (let x = 0; x < width; x += 1) {
+          let firstY = -1;
+          let lastY = -1;
+          for (let y = 0; y < height; y += 1) {
+            if (!recoveredMask[y * width + x]) continue;
+            if (firstY < 0) firstY = y;
+            lastY = y;
+          }
+          if (firstY >= 0 && lastY >= firstY) {
+            for (let y = firstY; y <= lastY; y += 1) {
+              recoveredMask[y * width + x] = 1;
+            }
+          }
+        }
+
+        cleanedMask.set(recoveredMask);
+      }
+    }
+  }
+
   // Carve a physical neck opening so top garments keep a head hole even with noisy silhouettes.
   carveNeckOpening(cleanedMask, width, height, garmentType);
 
@@ -2930,6 +3188,7 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
   const stitchPairs = [];
   const selfCollisionPairs = [];
   const stitchPairKeys = new Set();
+  let selfCollisionCounter = 0;
   let garmentColorSampleCount = 0;
   let garmentColorSumR = 0;
   let garmentColorSumG = 0;
@@ -3044,7 +3303,11 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
         stitchedBoundaryMask[index] = 1;
       }
       if (!isStitchedBoundary) {
-        selfCollisionPairs.push(frontIndex, backIndex);
+        // In fast preview mode we sparsely sample collision links to reduce payload + sim cost.
+        if (!fastPreview || (selfCollisionCounter % 6 === 0)) {
+          selfCollisionPairs.push(frontIndex, backIndex);
+        }
+        selfCollisionCounter += 1;
       }
 
       if (isStitchedBoundary) {
@@ -3137,7 +3400,7 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
       adjacency[third].add(second);
     }
 
-    const smoothIterations = 2;
+    const smoothIterations = fastPreview ? 1 : 2;
     const smoothAlpha = 0.18;
     for (let iteration = 0; iteration < smoothIterations; iteration += 1) {
       const next = positions.slice();
@@ -3177,6 +3440,7 @@ async function createApproxGarment3DModelFromCutout(buffer, garmentType = 'shirt
     framework: 'panel-cloth-local',
     pipelineVersion: GARMENT_PIPELINE_VERSION,
     format: 'tri-mesh',
+    garmentType: normalizeGarmentType(garmentType || 'shirt'),
     positions,
     uvs,
     indices,

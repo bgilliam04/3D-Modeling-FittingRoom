@@ -1,4 +1,4 @@
-const navToggle = document.getElementById('navToggle');
+﻿const navToggle = document.getElementById('navToggle');
 const siteNav = document.getElementById('siteNav');
 const contactForm = document.getElementById('contactForm');
 const formStatus = document.getElementById('formStatus');
@@ -80,7 +80,58 @@ let previewDragPlane = null;
 let previewDragOffset = null;
 let garmentSimulationState = null;
 let garmentSimulationLastTimestamp = 0;
+let analyzeRequestId = 0;
+let simulationModelBoundsBox = null;
+let simulationFallbackCenter = null;
+let simulationFallbackSize = null;
+let simulationBoundsLocalBox = null;
+let simulationBoundsWorldBox = null;
+let simulationBoundsToLocalMatrix = null;
 const ENABLE_BODY_COLLISION_IN_FIT_PREVIEW = true;
+
+function computeBoundsExcludingRoot(root, excludeRoot, outBox, localSpaceRoot = null) {
+  if (!THREE_LIB || !outBox) return null;
+  outBox.makeEmpty();
+  if (!root) return outBox;
+
+  if (!simulationBoundsLocalBox) simulationBoundsLocalBox = new THREE_LIB.Box3();
+  if (!simulationBoundsWorldBox) simulationBoundsWorldBox = new THREE_LIB.Box3();
+  if (!simulationBoundsToLocalMatrix) simulationBoundsToLocalMatrix = new THREE_LIB.Matrix4();
+
+  if (localSpaceRoot?.matrixWorld) {
+    simulationBoundsToLocalMatrix.copy(localSpaceRoot.matrixWorld).invert();
+  } else {
+    simulationBoundsToLocalMatrix.identity();
+  }
+
+  const isUnderExcludedRoot = (node) => {
+    let current = node;
+    while (current) {
+      if (current === excludeRoot) return true;
+      current = current.parent;
+    }
+    return false;
+  };
+
+  root.traverse((child) => {
+    if (!child?.isMesh || !child.geometry) return;
+    if (excludeRoot && isUnderExcludedRoot(child)) return;
+
+    const geometry = child.geometry;
+    if (!geometry.boundingBox) {
+      geometry.computeBoundingBox();
+    }
+    if (!geometry.boundingBox) return;
+
+    simulationBoundsLocalBox.copy(geometry.boundingBox);
+    simulationBoundsWorldBox.copy(simulationBoundsLocalBox)
+      .applyMatrix4(child.matrixWorld)
+      .applyMatrix4(simulationBoundsToLocalMatrix);
+    outBox.union(simulationBoundsWorldBox);
+  });
+
+  return outBox;
+}
 
 function getSizeGuideScaleMultiplier() {
   const numericSize = Number(currentClothingSizeValue);
@@ -1107,17 +1158,34 @@ function createGarmentMaterial(textureDataUrl = null, options = {}) {
     materialOptions.map = texture;
     materialOptions.color = 0xffffff;
     materialOptions.transparent = true;
-    materialOptions.alphaTest = 0.1;
+    // Keep low-alpha fabric detail visible (especially light/white garments).
+    materialOptions.alphaTest = 0.02;
   }
 
   return new THREE_LIB.MeshStandardMaterial(materialOptions);
 }
 
+function isLowerBodyCollisionGarment(garmentType) {
+  const type = String(garmentType || '').toLowerCase();
+  return type === 'pants' || type === 'jeans' || type === 'shorts';
+}
+
 function startGarmentSimulation(modelPayload) {
   if (!THREE_LIB || !generatedGarmentMesh) return;
-  if (!modelPayload || modelPayload.format !== 'tri-mesh') return;
+  if (!modelPayload) return;
 
-  const geometry = generatedGarmentMesh.geometry;
+  const simulationMesh = generatedGarmentMesh.isMesh
+    ? generatedGarmentMesh
+    : generatedGarmentMesh.getObjectByProperty?.('isMesh', true);
+  if (!simulationMesh) return;
+
+  const simulationMaterialArray = Array.isArray(simulationMesh.material)
+    ? simulationMesh.material
+    : [simulationMesh.material];
+  const seamMaterial = simulationMesh?.userData?.seamMaterial
+    || (simulationMaterialArray.length > 1 ? simulationMaterialArray[1] : null);
+
+  const geometry = simulationMesh.geometry;
   const positionAttr = geometry?.attributes?.position;
   if (!positionAttr?.array || positionAttr.array.length < 9) return;
 
@@ -1127,6 +1195,17 @@ function startGarmentSimulation(modelPayload) {
   const positions = positionAttr.array;
   const basePositions = Float32Array.from(positions);
   const velocities = new Float32Array(positions.length);
+  const garmentType = getSelectedGarmentType();
+  const isLowerBodyGarment = isLowerBodyCollisionGarment(garmentType);
+
+  let minBaseZ = Infinity;
+  let maxBaseZ = -Infinity;
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const z = basePositions[vertex * 3 + 2];
+    if (z < minBaseZ) minBaseZ = z;
+    if (z > maxBaseZ) maxBaseZ = z;
+  }
+  const baseDepth = Math.max(0.001, maxBaseZ - minBaseZ);
 
   const panelIds = Array.isArray(modelPayload.panelIds) ? modelPayload.panelIds : null;
   const surfaceSides = Array.isArray(modelPayload.surfaceSides) ? modelPayload.surfaceSides : null;
@@ -1136,9 +1215,9 @@ function startGarmentSimulation(modelPayload) {
     : new Array(vertexCount).fill(false);
 
   if (panelIds && seamPanelCount > 1 && panelIds.length >= vertexCount) {
-    const explodeRadius = 0.05;
+    // Minimize explode so panels start close enough for seam closure.
+    const explodeRadius = isLowerBodyGarment ? 0.025 : 0.012;
     for (let vertex = 0; vertex < vertexCount; vertex += 1) {
-      // Use surfaceSides: 0 = front panel → push +Z (in front of body), 1 = back panel → push -Z (behind body).
       const side = surfaceSides && surfaceSides.length >= vertexCount
         ? (Number(surfaceSides[vertex]) || 0)
         : (Number(panelIds[vertex]) || 0) % 2;
@@ -1152,7 +1231,8 @@ function startGarmentSimulation(modelPayload) {
   const seamVertexFlags = new Array(vertexCount).fill(false);
   const stitchPairKeySet = new Set();
   const restLengths = [];
-  const seamRestLength = 0; // Seam threads pull panels flush — zero rest length.
+  // Force seam closure: set rest length to a very small value.
+  const seamRestLength = 0.0025;
   for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
     const first = Number(stitchPairs[pair]);
     const second = Number(stitchPairs[pair + 1]);
@@ -1167,26 +1247,30 @@ function startGarmentSimulation(modelPayload) {
     restLengths.push(seamRestLength);
   }
 
-  // Pre-stitch: bring each stitch pair together so the simulation can close seams.
-  // Snap to the front-panel vertex position (the one with side=0 / smaller Z index),
-  // which is in front of the body rather than inside it.
+  // Pre-stitch: snap ALL seam pair vertices to their XY midpoint so they start AT the body
+  // sides rather than on the front/back face. Without this the seam force fires straight through
+  // the body, collision blocks it every frame, and the seam never closes.
+  // After snapping, basePositions is updated for seam vertices so the memory term doesn't
+  // drag them back to their pre-snap positions.
   for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
     const first = Number(stitchPairs[pair]);
     const second = Number(stitchPairs[pair + 1]);
     if (!Number.isInteger(first) || !Number.isInteger(second) || first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+    if (pinnedFlags[first] && pinnedFlags[second]) continue;
     const fi = first * 3;
     const si = second * 3;
-    // Determine which vertex belongs to the front panel (side 0).
-    const firstSide = surfaceSides && surfaceSides.length > first ? (Number(surfaceSides[first]) || 0) : 0;
-    const secondSide = surfaceSides && surfaceSides.length > second ? (Number(surfaceSides[second]) || 0) : 1;
-    // Use the front panel vertex's XYZ for both — places the seam on the outside of the body.
-    const frontFi = firstSide === 0 ? fi : si;
-    const backFi  = firstSide === 0 ? si : fi;
-    // Only snap if either vertex is pinned; otherwise let the sim pull them together dynamically.
-    if (pinnedFlags[first] || pinnedFlags[second]) {
-      positions[backFi]     = positions[frontFi];
-      positions[backFi + 1] = positions[frontFi + 1];
-      positions[backFi + 2] = positions[frontFi + 2];
+    const midX = (positions[fi]     + positions[si])     * 0.5;
+    const midY = (positions[fi + 1] + positions[si + 1]) * 0.5;
+    const midZ = (positions[fi + 2] + positions[si + 2]) * 0.5;
+    if (!pinnedFlags[first]) {
+      positions[fi]     = midX;
+      positions[fi + 1] = midY;
+      positions[fi + 2] = midZ;
+    }
+    if (!pinnedFlags[second]) {
+      positions[si]     = midX;
+      positions[si + 1] = midY;
+      positions[si + 2] = midZ;
     }
   }
 
@@ -1288,20 +1372,80 @@ function startGarmentSimulation(modelPayload) {
   }
 
   // Lock a stable front/back collision side per vertex from the base geometry.
-  let minBaseZ = Infinity;
-  let maxBaseZ = -Infinity;
-  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
-    const z = basePositions[vertex * 3 + 2];
-    if (z < minBaseZ) minBaseZ = z;
-    if (z > maxBaseZ) maxBaseZ = z;
-  }
   const baseMidZ = (minBaseZ + maxBaseZ) * 0.5;
   const collisionSideFlags = new Uint8Array(vertexCount);
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     collisionSideFlags[vertex] = basePositions[vertex * 3 + 2] >= baseMidZ ? 0 : 1;
   }
 
+  // For top garments: compute the max Y of pinned (shoulder/collar) vertices so the
+  // simulation can clamp free vertices below this ceiling — prevents fabric from rising
+  // up over the head.
+  let maxPinnedY = -Infinity;
+  if (!isLowerBodyGarment) {
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      if (pinnedFlags[vertex]) {
+        const py = basePositions[vertex * 3 + 1];
+        if (py > maxPinnedY) maxPinnedY = py;
+      }
+    }
+  }
+  if (!Number.isFinite(maxPinnedY)) maxPinnedY = 0;
+
+  // --- Initial panel placement around the body ---
+  // The garment mesh is scaled to match the avatar, so garment-local Z ~= +-0.006 (raw
+  // backend values) does NOT reach the body surface after scaling.  Build the collision
+  // cloud now to find the actual front (mxZ) and back (mnZ) surfaces in garment-local
+  // space, then shift each panel so it starts just OUTSIDE its side of the body.
+  let initialBodyCloud = null;
+  if (panelIds && seamPanelCount > 1 && currentModel) {
+    try {
+      simulationMesh.updateMatrixWorld(true);
+      currentModel.updateMatrixWorld(true);
+      initialBodyCloud = buildBodyCollisionCloud(currentModel, simulationMesh, generatedGarmentMesh);
+    } catch (_e) {
+      initialBodyCloud = null;
+    }
+  }
+  if (initialBodyCloud && initialBodyCloud.triangleCount > 0) {
+    const bodyFrontZ = initialBodyCloud.mxZ;
+    const bodyBackZ  = initialBodyCloud.mnZ;
+    const INIT_GAP   = 0.02;
+    let frontZSum = 0, frontCount = 0, backZSum = 0, backCount = 0;
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      const side = surfaceSides && surfaceSides.length >= vertexCount
+        ? (Number(surfaceSides[vertex]) || 0)
+        : (Number(panelIds[vertex]) || 0) % 2;
+      const vz = positions[vertex * 3 + 2];
+      if (side === 0) { frontZSum += vz; frontCount += 1; }
+      else             { backZSum  += vz; backCount  += 1; }
+    }
+    const frontZAvg  = frontCount > 0 ? frontZSum / frontCount : 0.05;
+    const backZAvg   = backCount  > 0 ? backZSum  / backCount  : -0.05;
+    const frontShift = (bodyFrontZ + INIT_GAP) - frontZAvg;
+    const backShift  = (bodyBackZ  - INIT_GAP) - backZAvg;
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      const side = surfaceSides && surfaceSides.length >= vertexCount
+        ? (Number(surfaceSides[vertex]) || 0)
+        : (Number(panelIds[vertex]) || 0) % 2;
+      positions[vertex * 3 + 2] += side === 0 ? frontShift : backShift;
+    }
+    // Update the memory-term anchor so it doesn't pull panels back inside the body.
+    basePositions.set(positions);
+  }
+
+  // After all placement and pre-snapping: update basePositions for seam vertices so the
+  // memory term doesn't fight the seam closure by pulling vertices back to their original positions.
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (seamVertexFlags[vertex]) {
+      basePositions[vertex * 3]     = positions[vertex * 3];
+      basePositions[vertex * 3 + 1] = positions[vertex * 3 + 1];
+      basePositions[vertex * 3 + 2] = positions[vertex * 3 + 2];
+    }
+  }
   garmentSimulationState = {
+    simulationMesh,
+    seamMaterial,
     geometry,
     positionAttr,
     positions,
@@ -1320,9 +1464,19 @@ function startGarmentSimulation(modelPayload) {
     collisionSideFlags,
     surfaceSides,
     seamVertexFlags,
+    garmentType,
     seamPanelCount,
+    maxPinnedY,
     stitchPairPhase: 0,
+    bodyCloud: initialBodyCloud || null,
     frame: 0,
+    lastGarmentWorldMatrix: Float32Array.from(simulationMesh.matrixWorld.elements),
+    stitchAccumDeltaX: new Float32Array(vertexCount),
+    stitchAccumDeltaY: new Float32Array(vertexCount),
+    stitchAccumDeltaZ: new Float32Array(vertexCount),
+    stitchAccumWeight: new Float32Array(vertexCount),
+    stitchTouchedVertices: new Int32Array(vertexCount),
+    seamStretchVisual: 0,
   };
 
   garmentSimulationLastTimestamp = 0;
@@ -1334,16 +1488,16 @@ function startGarmentSimulation(modelPayload) {
     selfCollisionPairCount: Math.floor(selfCollisionPairs.length / 2),
     seamPanelCount,
   });
-}
+}// Build once at simulation start: triangle mesh body collider in garment-local space.
 
 // Build once at simulation start: triangle mesh body collider in garment-local space.
-function buildBodyCollisionCloud(model, garmentMesh) {
+function buildBodyCollisionCloud(model, garmentMesh, excludeRoot = garmentMesh) {
   if (!model || !garmentMesh || !THREE_LIB) return null;
 
   const isUnderGarmentMesh = (node) => {
     let current = node;
     while (current) {
-      if (current === garmentMesh) return true;
+      if (current === excludeRoot) return true;
       current = current.parent;
     }
     return false;
@@ -1589,7 +1743,7 @@ function closestPointOnTriangle(vx, vy, vz, ax, ay, az, bx, by, bz, cx, cy, cz) 
 }
 
 function applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount, cloud) {
-  if (!cloud || !cloud.cellData || !cloud.triangleCount) return;
+  if (!cloud || !cloud.cellData || !cloud.triangleCount) return 0;
   const {
     triAx, triAy, triAz,
     triBx, triBy, triBz,
@@ -1615,13 +1769,18 @@ function applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount,
     mxZ,
   } = cloud;
 
-  const THICK = Math.max(0.018, cs * 0.32);
+  const THICK = Math.max(0.028, cs * 0.55);
+  const centerX = (mnX + mxX) * 0.5;
+  const centerY = (mnY + mxY) * 0.5;
+  const centerZ = (mnZ + mxZ) * 0.5;
   const visited = cloud.triVisited && cloud.triVisited.length === triangleCount
     ? cloud.triVisited
     : new Int32Array(triangleCount);
   let stamp = Number.isFinite(Number(cloud.triVisitStamp)) ? Number(cloud.triVisitStamp) : 1;
 
+  let correctedCount = 0;
   for (let v = 0; v < vertexCount; v += 1) {
+    if (pinnedFlags[v]) continue;
     const vi = v * 3;
     const vx = positions[vi];
     const vy = positions[vi + 1];
@@ -1635,8 +1794,9 @@ function applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount,
     let pushX = 0, pushY = 0, pushZ = 0;
     let foundCandidate = false;
 
-    // Search r=1 first; if nothing found expand to r=3 for deeply embedded vertices.
-    outerSearch: for (let radius = 1; radius <= 3; radius += 1) {
+    // Search neighborhood of increasing radius.  Radius 1-2 covers normal proximity;
+    // radius 3-4 catches vertices that have tunneled deeper into the body mesh.
+    outerSearch: for (let radius = 1; radius <= 4; radius += 1) {
       for (let dx = -radius; dx <= radius; dx += 1) {
         const cx = cx0 + dx;
         if (cx < 0 || cx >= gW) continue;
@@ -1669,66 +1829,58 @@ function applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount,
               const toVY = vy - _cpY;
               const toVZ = vz - _cpZ;
               const distSq = toVX * toVX + toVY * toVY + toVZ * toVZ;
-              const pen = THICK - Math.sqrt(Math.max(1e-12, distSq));
-              if (pen <= 0 || pen <= bestPen) continue;
+              const dist = Math.sqrt(Math.max(1e-12, distSq));
 
-              bestPen = pen;
-              if (distSq > 1e-10) {
-                const invDist = 1 / Math.sqrt(distSq);
-                pushX = toVX * invDist;
-                pushY = toVY * invDist;
-                pushZ = toVZ * invDist;
-              } else {
-                // Degenerate case: vertex is exactly on closest point; use triangle normal.
-                pushX = triNx[tri];
-                pushY = triNy[tri];
-                pushZ = triNz[tri];
+              // Orient triangle normal to point away from body center.
+              let nX = triNx[tri];
+              let nY = triNy[tri];
+              let nZ = triNz[tri];
+              const cpx = _cpX - centerX;
+              const cpy = _cpY - centerY;
+              const cpz = _cpZ - centerZ;
+              if (nX * cpx + nY * cpy + nZ * cpz < 0) {
+                nX = -nX;
+                nY = -nY;
+                nZ = -nZ;
               }
+
+              const signed = toVX * nX + toVY * nY + toVZ * nZ;
+              let pen = 0;
+              let candX = 0;
+              let candY = 0;
+              let candZ = 0;
+
+              if (signed < 0) {
+                // Inside body side of surface: force outward along oriented normal.
+                pen = Math.abs(signed) + THICK;
+                candX = nX;
+                candY = nY;
+                candZ = nZ;
+              } else {
+                // Outside but close: maintain clearance thickness.
+                pen = THICK - dist;
+                if (dist > 1e-10) {
+                  const invDist = 1 / dist;
+                  candX = toVX * invDist;
+                  candY = toVY * invDist;
+                  candZ = toVZ * invDist;
+                } else {
+                  candX = nX;
+                  candY = nY;
+                  candZ = nZ;
+                }
+              }
+
+              if (pen <= 0 || pen <= bestPen) continue;
+              bestPen = pen;
+              pushX = candX;
+              pushY = candY;
+              pushZ = candZ;
             }
           }
         }
       }
       if (foundCandidate) break outerSearch;
-    }
-
-    if (!foundCandidate) {
-      const inExpandedBounds =
-        vx >= mnX - 0.04 && vx <= mxX + 0.04 &&
-        vy >= mnY - 0.04 && vy <= mxY + 0.04 &&
-        vz >= mnZ - 0.04 && vz <= mxZ + 0.04;
-
-      if (inExpandedBounds) {
-        // Hard fallback: coarse nearest-triangle search guarantees a collision direction
-        // even if grid bins overflowed or neighborhood lookup found no candidates.
-        const coarseStride = Math.max(1, Math.floor(triangleCount / 600));
-        for (let tri = 0; tri < triangleCount; tri += coarseStride) {
-          closestPointOnTriangle(
-            vx, vy, vz,
-            triAx[tri], triAy[tri], triAz[tri],
-            triBx[tri], triBy[tri], triBz[tri],
-            triCx[tri], triCy[tri], triCz[tri]
-          );
-
-          const toVX = vx - _cpX;
-          const toVY = vy - _cpY;
-          const toVZ = vz - _cpZ;
-          const distSq = toVX * toVX + toVY * toVY + toVZ * toVZ;
-          const pen = THICK - Math.sqrt(Math.max(1e-12, distSq));
-          if (pen <= 0 || pen <= bestPen) continue;
-
-          bestPen = pen;
-          if (distSq > 1e-10) {
-            const invDist = 1 / Math.sqrt(distSq);
-            pushX = toVX * invDist;
-            pushY = toVY * invDist;
-            pushZ = toVZ * invDist;
-          } else {
-            pushX = triNx[tri];
-            pushY = triNy[tri];
-            pushZ = triNz[tri];
-          }
-        }
-      }
     }
 
     stamp += 1;
@@ -1738,10 +1890,11 @@ function applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount,
       positions[vi]     += pushX * bestPen;
       positions[vi + 1] += pushY * bestPen;
       positions[vi + 2] += pushZ * bestPen;
+      correctedCount += 1;
 
       const vn = velocities[vi] * pushX + velocities[vi + 1] * pushY + velocities[vi + 2] * pushZ;
       if (vn < 0) {
-        velocities[vi]     -= vn * pushX;
+        velocities[vi] -= vn * pushX;
         velocities[vi + 1] -= vn * pushY;
         velocities[vi + 2] -= vn * pushZ;
       }
@@ -1750,6 +1903,369 @@ function applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount,
 
   cloud.triVisited = visited;
   cloud.triVisitStamp = stamp;
+  return correctedCount;
+}
+
+function applyBodyBoundsFallbackCollision(positions, velocities, pinnedFlags, vertexCount, boundsBox) {
+  if (!boundsBox) return;
+
+  const minX = boundsBox.min.x;
+  const maxX = boundsBox.max.x;
+  const minY = boundsBox.min.y;
+  const maxY = boundsBox.max.y;
+  const minZ = boundsBox.min.z;
+  const maxZ = boundsBox.max.z;
+  const guard = 0.01;
+  const minXi = minX + guard;
+  const maxXi = maxX - guard;
+  const minYi = minY + guard;
+  const maxYi = maxY - guard;
+  const minZi = minZ + guard;
+  const maxZi = maxZ - guard;
+  const pushOut = 0.0025;
+
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (pinnedFlags[vertex]) continue;
+
+    const base = vertex * 3;
+    const px = positions[base];
+    const py = positions[base + 1];
+    const pz = positions[base + 2];
+
+    if (px <= minXi || px >= maxXi || py <= minYi || py >= maxYi || pz <= minZi || pz >= maxZi) {
+      continue;
+    }
+
+    const dMinX = Math.abs(px - minXi);
+    const dMaxX = Math.abs(maxXi - px);
+    const dMinY = Math.abs(py - minYi);
+    const dMaxY = Math.abs(maxYi - py);
+    const dMinZ = Math.abs(pz - minZi);
+    const dMaxZ = Math.abs(maxZi - pz);
+
+    let nx = -1;
+    let ny = 0;
+    let nz = 0;
+    let nearest = dMinX;
+
+    if (dMaxX < nearest) { nearest = dMaxX; nx = 1; ny = 0; nz = 0; }
+    if (dMinY < nearest) { nearest = dMinY; nx = 0; ny = -1; nz = 0; }
+    if (dMaxY < nearest) { nearest = dMaxY; nx = 0; ny = 1; nz = 0; }
+    if (dMinZ < nearest) { nearest = dMinZ; nx = 0; ny = 0; nz = -1; }
+    if (dMaxZ < nearest) { nearest = dMaxZ; nx = 0; ny = 0; nz = 1; }
+
+    const amount = Math.min(0.0045, Math.max(pushOut, nearest * 0.25 + pushOut));
+    positions[base] += nx * amount;
+    positions[base + 1] += ny * amount;
+    positions[base + 2] += nz * amount;
+
+    const vn = velocities[base] * nx + velocities[base + 1] * ny + velocities[base + 2] * nz;
+    if (vn < 0) {
+      velocities[base] -= vn * nx;
+      velocities[base + 1] -= vn * ny;
+      velocities[base + 2] -= vn * nz;
+    }
+  }
+}
+
+function applyBodyGhostGuardCollision(positions, velocities, pinnedFlags, vertexCount, boundsBox) {
+  if (!boundsBox) return;
+
+  // Guard band keeps this from over-correcting surface-near vertices.
+  const guard = 0.01;
+  const minX = boundsBox.min.x + guard;
+  const maxX = boundsBox.max.x - guard;
+  const minY = boundsBox.min.y + guard;
+  const maxY = boundsBox.max.y - guard;
+  const minZ = boundsBox.min.z + guard;
+  const maxZ = boundsBox.max.z - guard;
+
+  if (minX >= maxX || minY >= maxY || minZ >= maxZ) return;
+
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (pinnedFlags[vertex]) continue;
+
+    const base = vertex * 3;
+    const px = positions[base];
+    const py = positions[base + 1];
+    const pz = positions[base + 2];
+
+    if (px <= minX || px >= maxX || py <= minY || py >= maxY || pz <= minZ || pz >= maxZ) {
+      continue;
+    }
+
+    const dMinX = Math.abs(px - minX);
+    const dMaxX = Math.abs(maxX - px);
+    const dMinY = Math.abs(py - minY);
+    const dMaxY = Math.abs(maxY - py);
+    const dMinZ = Math.abs(pz - minZ);
+    const dMaxZ = Math.abs(maxZ - pz);
+
+    let nx = -1;
+    let ny = 0;
+    let nz = 0;
+    let push = dMinX;
+
+    if (dMaxX < push) { push = dMaxX; nx = 1; ny = 0; nz = 0; }
+    if (dMinY < push) { push = dMinY; nx = 0; ny = -1; nz = 0; }
+    if (dMaxY < push) { push = dMaxY; nx = 0; ny = 1; nz = 0; }
+    if (dMinZ < push) { push = dMinZ; nx = 0; ny = 0; nz = -1; }
+    if (dMaxZ < push) { push = dMaxZ; nx = 0; ny = 0; nz = 1; }
+
+    const outPush = Math.min(0.01, Math.max(0.002, push + 0.004));
+    positions[base] += nx * outPush;
+    positions[base + 1] += ny * outPush;
+    positions[base + 2] += nz * outPush;
+
+    const vn = velocities[base] * nx + velocities[base + 1] * ny + velocities[base + 2] * nz;
+    if (vn < 0) {
+      velocities[base] -= vn * nx;
+      velocities[base + 1] -= vn * ny;
+      velocities[base + 2] -= vn * nz;
+    }
+  }
+}
+
+function applyHardWorldContainmentCollision(positions, velocities, pinnedFlags, vertexCount, currentModel, simulationMesh) {
+  if (!THREE_LIB || !currentModel || !simulationMesh?.matrixWorld) return 0;
+
+  const worldBounds = new THREE_LIB.Box3().setFromObject(currentModel);
+  if (worldBounds.isEmpty()) return 0;
+
+  const invWorld = new THREE_LIB.Matrix4().copy(simulationMesh.matrixWorld).invert();
+  const pWorld = new THREE_LIB.Vector3();
+  const pLocal = new THREE_LIB.Vector3();
+
+  const guard = 0.012;
+  const minX = worldBounds.min.x + guard;
+  const maxX = worldBounds.max.x - guard;
+  const minY = worldBounds.min.y + guard;
+  const maxY = worldBounds.max.y - guard;
+  const minZ = worldBounds.min.z + guard;
+  const maxZ = worldBounds.max.z - guard;
+
+  if (minX >= maxX || minY >= maxY || minZ >= maxZ) return 0;
+
+  let contacts = 0;
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (pinnedFlags[vertex]) continue;
+
+    const base = vertex * 3;
+    pWorld.set(positions[base], positions[base + 1], positions[base + 2]).applyMatrix4(simulationMesh.matrixWorld);
+
+    if (pWorld.x <= minX || pWorld.x >= maxX || pWorld.y <= minY || pWorld.y >= maxY || pWorld.z <= minZ || pWorld.z >= maxZ) {
+      continue;
+    }
+
+    const dMinX = Math.abs(pWorld.x - minX);
+    const dMaxX = Math.abs(maxX - pWorld.x);
+    const dMinY = Math.abs(pWorld.y - minY);
+    const dMaxY = Math.abs(maxY - pWorld.y);
+    const dMinZ = Math.abs(pWorld.z - minZ);
+    const dMaxZ = Math.abs(maxZ - pWorld.z);
+
+    let nx = -1;
+    let ny = 0;
+    let nz = 0;
+    let nearest = dMinX;
+
+    if (dMaxX < nearest) { nearest = dMaxX; nx = 1; ny = 0; nz = 0; }
+    if (dMinY < nearest) { nearest = dMinY; nx = 0; ny = -1; nz = 0; }
+    if (dMaxY < nearest) { nearest = dMaxY; nx = 0; ny = 1; nz = 0; }
+    if (dMinZ < nearest) { nearest = dMinZ; nx = 0; ny = 0; nz = -1; }
+    if (dMaxZ < nearest) { nearest = dMaxZ; nx = 0; ny = 0; nz = 1; }
+
+    const amount = Math.min(0.012, Math.max(0.004, nearest + 0.004));
+    pWorld.x += nx * amount;
+    pWorld.y += ny * amount;
+    pWorld.z += nz * amount;
+
+    pLocal.copy(pWorld).applyMatrix4(invWorld);
+    positions[base] = pLocal.x;
+    positions[base + 1] = pLocal.y;
+    positions[base + 2] = pLocal.z;
+
+    const vn = velocities[base] * nx + velocities[base + 1] * ny + velocities[base + 2] * nz;
+    if (vn < 0) {
+      velocities[base] -= vn * nx;
+      velocities[base + 1] -= vn * ny;
+      velocities[base + 2] -= vn * nz;
+    }
+    contacts += 1;
+  }
+
+  return contacts;
+}
+
+function applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, cloud, garmentType, surfaceSides = null) {
+  if (!cloud || !Number.isFinite(cloud.mnX) || !Number.isFinite(cloud.mxX)) return 0;
+  if (!isLowerBodyCollisionGarment(garmentType)) return 0;
+
+  const minX = cloud.mnX;
+  const maxX = cloud.mxX;
+  const minY = cloud.mnY;
+  const maxY = cloud.mxY;
+  const minZ = cloud.mnZ;
+  const maxZ = cloud.mxZ;
+
+  const bodyWidth = Math.max(0.05, maxX - minX);
+  const bodyDepth = Math.max(0.04, maxZ - minZ);
+  const bodyHeight = Math.max(0.2, maxY - minY);
+
+  const centerX = (minX + maxX) * 0.5;
+  const centerZ = (minZ + maxZ) * 0.5;
+  const hipY = minY + bodyHeight * 0.78;
+  const ankleY = minY + bodyHeight * 0.04;
+  const segmentY = hipY - ankleY;
+  if (segmentY <= 1e-5) return 0;
+
+  // Estimate left/right leg centerlines from lower-body collider triangles when available.
+  let leftCenterX = centerX - bodyWidth * 0.14;
+  let rightCenterX = centerX + bodyWidth * 0.14;
+  let leftCenterZ = centerZ;
+  let rightCenterZ = centerZ;
+  if (cloud.triAx && cloud.triAy && cloud.triAz && cloud.triangleCount) {
+    let lCount = 0;
+    let rCount = 0;
+    let lSumX = 0;
+    let rSumX = 0;
+    let lSumZ = 0;
+    let rSumZ = 0;
+    const yMinBand = minY + bodyHeight * 0.12;
+    const yMaxBand = minY + bodyHeight * 0.64;
+
+    for (let tri = 0; tri < cloud.triangleCount; tri += 1) {
+      const cx = (cloud.triAx[tri] + cloud.triBx[tri] + cloud.triCx[tri]) / 3;
+      const cy = (cloud.triAy[tri] + cloud.triBy[tri] + cloud.triCy[tri]) / 3;
+      const cz = (cloud.triAz[tri] + cloud.triBz[tri] + cloud.triCz[tri]) / 3;
+      if (cy < yMinBand || cy > yMaxBand) continue;
+
+      if (cx < centerX) {
+        lSumX += cx;
+        lSumZ += cz;
+        lCount += 1;
+      } else {
+        rSumX += cx;
+        rSumZ += cz;
+        rCount += 1;
+      }
+    }
+
+    if (lCount >= 10) {
+      leftCenterX = lSumX / lCount;
+      leftCenterZ = lSumZ / lCount;
+    }
+    if (rCount >= 10) {
+      rightCenterX = rSumX / rCount;
+      rightCenterZ = rSumZ / rCount;
+    }
+  }
+
+  // Keep leg axes stable and symmetric to prevent one-side ballooning from noisy sampling.
+  const estLeftGap = Math.max(0, centerX - leftCenterX);
+  const estRightGap = Math.max(0, rightCenterX - centerX);
+  const symmetricGap = Math.max(bodyWidth * 0.11, Math.min(bodyWidth * 0.2, (estLeftGap + estRightGap) * 0.5));
+  leftCenterX = centerX - symmetricGap;
+  rightCenterX = centerX + symmetricGap;
+
+  const maxZOffset = bodyDepth * 0.12;
+  leftCenterZ = centerZ + Math.max(-maxZOffset, Math.min(maxZOffset, leftCenterZ - centerZ));
+  rightCenterZ = centerZ + Math.max(-maxZOffset, Math.min(maxZOffset, rightCenterZ - centerZ));
+  const avgCenterZ = (leftCenterZ + rightCenterZ) * 0.5;
+  leftCenterZ = avgCenterZ;
+  rightCenterZ = avgCenterZ;
+
+  const legRadius = Math.max(0.022, Math.min(bodyWidth * 0.092, bodyDepth * 0.29));
+  const maxInfluence = legRadius + 0.02;
+  const centerNoPushBand = bodyWidth * 0.012;
+
+  const capsuleDistance = (vx, vy, vz, capsuleX, capsuleZ) => {
+    const t = Math.max(0, Math.min(1, (vy - ankleY) / segmentY));
+    const py = ankleY + segmentY * t;
+    const dx = vx - capsuleX;
+    const dy = vy - py;
+    const dz = vz - capsuleZ;
+    const radialSq = dx * dx + dz * dz;
+    const radial = Math.sqrt(Math.max(1e-12, radialSq));
+    return { radial, dx, dy, dz };
+  };
+
+  let contacts = 0;
+
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const pinScale = pinnedFlags[vertex] ? 0.35 : 1.0;
+    const index = vertex * 3;
+    const vx = positions[index];
+    const vy = positions[index + 1];
+    const vz = positions[index + 2];
+
+    if (vy > hipY + 0.1 || vy < ankleY - 0.06) continue;
+
+    const left = capsuleDistance(vx, vy, vz, leftCenterX, leftCenterZ);
+    const right = capsuleDistance(vx, vy, vz, rightCenterX, rightCenterZ);
+    const best = left.radial < right.radial ? left : right;
+
+    // Keep a tiny no-push center band only to avoid seam blow-up; still allow contact around inner thighs.
+    if (Math.abs(vx - centerX) < centerNoPushBand && best.radial > legRadius * 0.96) continue;
+    if (best.radial >= maxInfluence) continue;
+
+    const inv = 1 / Math.max(1e-6, best.radial);
+    const penetration = legRadius - best.radial;
+    const push = penetration > 0
+      ? Math.min(0.0045, penetration * 0.62)
+      : Math.min(0.0012, (maxInfluence - best.radial) * 0.2);
+    const lateralScale = Math.abs(best.dx) > Math.abs(best.dz) * 1.5 ? 0.72 : 1.0;
+    // Push in XZ only to avoid ballooning/lifting along Y.
+    positions[index] += best.dx * inv * push * pinScale * lateralScale;
+    positions[index + 2] += best.dz * inv * push * pinScale;
+
+    // Preserve front/back shell thickness so lower-body garments don't collapse flat.
+    if (surfaceSides && surfaceSides.length > vertex) {
+      const sideValue = Number(surfaceSides[vertex]);
+      if (Number.isFinite(sideValue)) {
+        const sideSign = sideValue === 0 ? 1 : -1;
+        const targetShell = Math.max(0.012, Math.min(0.03, legRadius * 0.55));
+        const shellCenterZ = best === left ? leftCenterZ : rightCenterZ;
+        const signedDepth = (positions[index + 2] - shellCenterZ) * sideSign;
+        if (signedDepth < targetShell) {
+          const missing = targetShell - signedDepth;
+          positions[index + 2] += sideSign * Math.min(0.004, missing * 0.45) * pinScale;
+        }
+      }
+    }
+    contacts += 1;
+  }
+
+  // Waistband collision ring: keeps top of pants outside pelvis/waist volume.
+  const waistCenterY = minY + bodyHeight * 0.62;
+  const waistHalfBand = bodyHeight * 0.08;
+  const waistRadiusX = Math.max(bodyWidth * 0.25, legRadius * 1.9);
+  const waistRadiusZ = Math.max(bodyDepth * 0.36, legRadius * 1.7);
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const pinScale = pinnedFlags[vertex] ? 0.35 : 1.0;
+    const index = vertex * 3;
+    const vx = positions[index];
+    const vy = positions[index + 1];
+    const vz = positions[index + 2];
+    if (Math.abs(vy - waistCenterY) > waistHalfBand) continue;
+
+    const dx = vx - centerX;
+    const dz = vz - centerZ;
+    const nx = dx / Math.max(1e-6, waistRadiusX);
+    const nz = dz / Math.max(1e-6, waistRadiusZ);
+    const d = Math.sqrt(nx * nx + nz * nz);
+    if (d >= 1.0) continue;
+
+    const invD = 1 / Math.max(1e-6, d);
+    const radialX = nx * invD;
+    const radialZ = nz * invD;
+    const push = Math.min(0.004, (1.0 - d) * 0.018);
+    positions[index] += radialX * push * waistRadiusX * pinScale;
+    positions[index + 2] += radialZ * push * waistRadiusZ * pinScale;
+    contacts += 1;
+  }
+
+  return contacts;
 }
 
 function stepGarmentSimulation(deltaSeconds) {
@@ -1760,6 +2276,8 @@ function stepGarmentSimulation(deltaSeconds) {
 
   const state = garmentSimulationState;
   const {
+    simulationMesh,
+    seamMaterial,
     geometry,
     positionAttr,
     positions,
@@ -1778,45 +2296,100 @@ function stepGarmentSimulation(deltaSeconds) {
     collisionSideFlags,
     surfaceSides,
     seamVertexFlags,
+    garmentType,
     stitchPairPhase,
+    stitchAccumDeltaX,
+    stitchAccumDeltaY,
+    stitchAccumDeltaZ,
+    stitchAccumWeight,
+    stitchTouchedVertices,
+    maxPinnedY,
   } = state;
+
+  // Debug: Log average seam distance
+  if (stitchPairs.length > 1) {
+    let seamDistSum = 0, seamDistCount = 0;
+    for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
+      const first = Number(stitchPairs[pair]);
+      const second = Number(stitchPairs[pair + 1]);
+      if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+      const fi = first * 3, si = second * 3;
+      const dx = positions[fi] - positions[si];
+      const dy = positions[fi + 1] - positions[si + 1];
+      const dz = positions[fi + 2] - positions[si + 2];
+      seamDistSum += Math.sqrt(dx * dx + dy * dy + dz * dz);
+      seamDistCount++;
+    }
+    if (seamDistCount > 0 && state.frame % 30 === 0) {
+      console.log('[DEBUG] Avg seam distance:', (seamDistSum / seamDistCount).toFixed(5));
+    }
+  }
+
+  const currentGarmentWorldMatrix = simulationMesh?.matrixWorld?.elements;
+  if (state.lastGarmentWorldMatrix && currentGarmentWorldMatrix && currentGarmentWorldMatrix.length === 16) {
+    let hasTransformDrift = false;
+    for (let i = 0; i < 16; i += 1) {
+      if (Math.abs(Number(currentGarmentWorldMatrix[i]) - Number(state.lastGarmentWorldMatrix[i])) > 1e-4) {
+        hasTransformDrift = true;
+        break;
+      }
+    }
+    if (hasTransformDrift) {
+      for (let i = 0; i < 16; i += 1) {
+        state.lastGarmentWorldMatrix[i] = Number(currentGarmentWorldMatrix[i]);
+      }
+      state.bodyCloud = null;
+    }
+  }
 
   // Build body-mesh collision cloud and retry until successful.
   // If this build fails once (timing/load order), collisions would otherwise appear "off" forever.
   if (!state.bodyCloud || !state.bodyCloud.triangleCount) {
     currentModel.updateMatrixWorld(true);
-    generatedGarmentMesh.updateMatrixWorld(true);
-    state.bodyCloud = buildBodyCollisionCloud(currentModel, generatedGarmentMesh);
+    simulationMesh.updateMatrixWorld(true);
+    state.bodyCloud = buildBodyCollisionCloud(currentModel, simulationMesh, generatedGarmentMesh);
 
     if (!state.bodyCloud || !state.bodyCloud.triangleCount) {
       if (!state.lastBodyCloudBuildFailureFrame || state.frame - state.lastBodyCloudBuildFailureFrame > 30) {
         state.lastBodyCloudBuildFailureFrame = state.frame;
-        updateDebugPanel('Body collision mesh build failed; retrying next frame.', {
+        updateDebugPanel('[COLLISION CLOUD FAIL] Body collision mesh build failed; retrying next frame.', {
           frame: state.frame,
+          currentModel: !!currentModel,
+          simulationMesh: !!simulationMesh,
+          generatedGarmentMesh: !!generatedGarmentMesh,
         });
       }
     } else {
-      updateDebugPanel('Body collision mesh built.', {
+      updateDebugPanel('[COLLISION CLOUD OK] Body collision mesh built.', {
         triangles: state.bodyCloud.triangleCount,
         cellSize: Number(state.bodyCloud.cs.toFixed(4)),
         grid: `${state.bodyCloud.gW}x${state.bodyCloud.gH}x${state.bodyCloud.gD}`,
         droppedCellRefs: state.bodyCloud.droppedCellRefs,
+        frame: state.frame,
       });
     }
   }
 
   // If avatar is skinned/posed, periodically refresh cloud so collision matches current body pose.
-  if (state.bodyCloud?.hasSkinnedMesh && (state.frame % 90 === 0)) {
+  if (state.bodyCloud?.hasSkinnedMesh && (state.frame % 48 === 0)) {
     currentModel.updateMatrixWorld(true);
-    generatedGarmentMesh.updateMatrixWorld(true);
-    const refreshedCloud = buildBodyCollisionCloud(currentModel, generatedGarmentMesh);
+    simulationMesh.updateMatrixWorld(true);
+    const refreshedCloud = buildBodyCollisionCloud(currentModel, simulationMesh, generatedGarmentMesh);
     if (refreshedCloud) {
       state.bodyCloud = refreshedCloud;
     }
   }
   const bodyCloud = state.bodyCloud;
 
-  if (new THREE_LIB.Box3().setFromObject(currentModel).isEmpty()) {
+  if (!simulationModelBoundsBox) simulationModelBoundsBox = new THREE_LIB.Box3();
+  if (bodyCloud && Number.isFinite(bodyCloud.mnX) && Number.isFinite(bodyCloud.mxX)) {
+    simulationModelBoundsBox.min.set(bodyCloud.mnX, bodyCloud.mnY, bodyCloud.mnZ);
+    simulationModelBoundsBox.max.set(bodyCloud.mxX, bodyCloud.mxY, bodyCloud.mxZ);
+  } else {
+    computeBoundsExcludingRoot(currentModel, generatedGarmentMesh, simulationModelBoundsBox, simulationMesh);
+  }
+
+  if (simulationModelBoundsBox.isEmpty()) {
     garmentSimulationState = null;
     return;
   }
@@ -1824,8 +2397,10 @@ function stepGarmentSimulation(deltaSeconds) {
   const isInteractiveSolve = Boolean(isDraggingPreviewGarment);
   const largeMesh = vertexCount >= 18000;
   const veryLargeMesh = vertexCount >= 28000;
+  const isLowerBodyGarment = isLowerBodyCollisionGarment(garmentType);
+  const isTopGarment = !isLowerBodyGarment;
 
-  const substeps = isInteractiveSolve ? 1 : (veryLargeMesh ? 1 : 2);
+  const substeps = isInteractiveSolve ? 1 : (isLowerBodyGarment ? 1 : (veryLargeMesh ? 1 : 2));
   const deltaScale = (deltaSeconds * 60) / substeps;
   const gravity = -0.00085 * deltaScale;
   const damping = Math.pow(0.965, deltaScale);
@@ -1834,9 +2409,51 @@ function stepGarmentSimulation(deltaSeconds) {
 
   const stretchIterations = isInteractiveSolve ? 2 : (largeMesh ? 3 : 4);
   const bendIterations = isInteractiveSolve ? 1 : 2;
-  const stitchIterations = isInteractiveSolve ? 12 : (veryLargeMesh ? 12 : (largeMesh ? 16 : 24));
-  const selfCollisionIterations = isInteractiveSolve ? 1 : (largeMesh ? 2 : 3);
-  const coupledTerminalIterations = isInteractiveSolve ? 6 : (veryLargeMesh ? 6 : (largeMesh ? 8 : 12));
+  const stitchIterations = isInteractiveSolve
+    ? 12
+    : (isLowerBodyGarment ? (veryLargeMesh ? 12 : (largeMesh ? 16 : 22)) : (veryLargeMesh ? 22 : (largeMesh ? 32 : 44)));
+  const selfCollisionIterations = isInteractiveSolve ? 1 : (isLowerBodyGarment ? 1 : (largeMesh ? 2 : 3));
+  const coupledTerminalIterations = isInteractiveSolve
+    ? 7
+    : (isLowerBodyGarment ? (veryLargeMesh ? 6 : (largeMesh ? 8 : 12)) : (veryLargeMesh ? 16 : (largeMesh ? 22 : 28)));
+
+  const applyActiveBodyCollision = (isFinalPass = false) => {
+    if (!ENABLE_BODY_COLLISION_IN_FIT_PREVIEW) return;
+    const hasMeshCloud = Boolean(bodyCloud && bodyCloud.triangleCount);
+    let meshHitCount = 0;
+    const meshPasses = hasMeshCloud ? (isFinalPass && isTopGarment ? 3 : 1) : 0;
+    if (hasMeshCloud) {
+      for (let pass = 0; pass < meshPasses; pass += 1) {
+        const hits = applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount, bodyCloud) || 0;
+        meshHitCount += hits;
+        if (hits <= 0) break;
+      }
+    } else {
+      applyBodyBoundsFallbackCollision(positions, velocities, pinnedFlags, vertexCount, simulationModelBoundsBox);
+    }
+
+    // Keep ghost guard as a last-resort only when mesh cloud is unavailable.
+    if (isFinalPass && !hasMeshCloud) {
+      applyBodyGhostGuardCollision(positions, velocities, pinnedFlags, vertexCount, simulationModelBoundsBox);
+    }
+
+    if (!hasMeshCloud) {
+      if (state.frame % 30 === 0) {
+        updateDebugPanel('[COLLISION CLOUD MISSING] meshCloud missing or empty during collision pass!', {
+          meshCloudCollision: false,
+          fallbackCollision: true,
+          frame: state.frame,
+        });
+      }
+    } else if (state.frame % 120 === 0) {
+      updateDebugPanel('[COLLISION CLOUD USED] Collision pass active.', {
+        meshCloudCollision: true,
+        fallbackCollision: false,
+        meshCollisionHits: meshHitCount,
+        frame: state.frame,
+      });
+    }
+  };
 
   const solveDistancePairs = (pairs, pairRestLengths, stiffness, pairOffset = 0) => {
     const pairCount = Math.floor(pairs.length / 2);
@@ -1860,9 +2477,10 @@ function stepGarmentSimulation(deltaSeconds) {
       const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (currentLength < 1e-6) continue;
 
-      // Preserve panel dimensions: allow limited strain so cloth wraps without resizing.
-      const minLength = restLength * 0.93;
-      const maxLength = restLength * 1.07;
+      // Seam-adjacent edges stretch more so seam vertices can travel around the body without snapping back.
+      const isSeamEdge = seamVertexFlags[first] || seamVertexFlags[second];
+      const minLength = restLength * (isTopGarment ? 0.75 : 0.90);
+      const maxLength = restLength * (isTopGarment ? (isSeamEdge ? 4.0 : 1.35) : (isSeamEdge ? 2.5 : 1.12));
       const targetLength = Math.max(minLength, Math.min(maxLength, currentLength));
       const correction = ((currentLength - targetLength) / currentLength) * stiffness;
       const correctionX = dx * correction;
@@ -1890,12 +2508,6 @@ function stepGarmentSimulation(deltaSeconds) {
     }
   };
 
-  const stitchAccumDeltaX = new Float32Array(vertexCount);
-  const stitchAccumDeltaY = new Float32Array(vertexCount);
-  const stitchAccumDeltaZ = new Float32Array(vertexCount);
-  const stitchAccumWeight = new Float32Array(vertexCount);
-  const stitchTouchedVertices = new Int32Array(vertexCount);
-
   const solveStitchPairsGlobal = (stiffness = 1.0, pairOffset = 0) => {
     const pairCount = Math.floor(stitchPairs.length / 2);
     if (pairCount <= 0) return;
@@ -1922,7 +2534,8 @@ function stepGarmentSimulation(deltaSeconds) {
       const correction = ((currentLength - restLength) / currentLength) * stiffness;
       const correctionX = dx * correction;
       const correctionY = dy * correction;
-      const correctionZ = dz * correction;
+      const seamZWeight = isLowerBodyGarment ? 0.38 : 1.0;
+      const correctionZ = dz * correction * seamZWeight;
 
       const firstMovable = pinnedFlags[first] ? 0 : 1;
       const secondMovable = pinnedFlags[second] ? 0 : 1;
@@ -2017,14 +2630,15 @@ function stepGarmentSimulation(deltaSeconds) {
       );
       const blockedByCollision = firstPenetration > 0.0005 || secondPenetration > 0.0005;
       const zWeight = blockedByCollision ? zWeightNearCollision : zWeightFree;
-      const weightedDz = dz * zWeight;
-      const currentLength = Math.sqrt(dx * dx + dy * dy + weightedDz * weightedDz);
+      const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (currentLength < 1e-6) continue;
+      if (currentLength <= restLength) continue;
 
       const correction = ((currentLength - restLength) / currentLength) * stiffness;
       const correctionX = dx * correction;
       const correctionY = dy * correction;
-      const correctionZ = weightedDz * correction;
+      const seamZWeight = isLowerBodyGarment ? 0.45 : 1.0;
+      const correctionZ = dz * correction * seamZWeight * zWeight;
 
       const firstMovable = pinnedFlags[first] ? 0 : 1;
       const secondMovable = pinnedFlags[second] ? 0 : 1;
@@ -2047,7 +2661,68 @@ function stepGarmentSimulation(deltaSeconds) {
     }
   };
 
+  const holdClosedSeams = () => {
+    const pairCount = Math.floor(stitchPairs.length / 2);
+    if (pairCount <= 0) return;
+    const holdDistance = isLowerBodyGarment ? 0.014 : 0.018;
+    const holdBlend = isLowerBodyGarment ? 0.55 : 0.68;
+
+    for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
+      const first = Number(stitchPairs[pair]);
+      const second = Number(stitchPairs[pair + 1]);
+      if (!Number.isInteger(first) || !Number.isInteger(second)) continue;
+      if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+
+      const firstIndex = first * 3;
+      const secondIndex = second * 3;
+      const dx = positions[firstIndex] - positions[secondIndex];
+      const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
+      const dz = positions[firstIndex + 2] - positions[secondIndex + 2];
+      const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (currentLength > holdDistance) continue;
+
+      const midX = (positions[firstIndex] + positions[secondIndex]) * 0.5;
+      const midY = (positions[firstIndex + 1] + positions[secondIndex + 1]) * 0.5;
+      const midZ = (positions[firstIndex + 2] + positions[secondIndex + 2]) * 0.5;
+
+      if (!pinnedFlags[first]) {
+        positions[firstIndex] += (midX - positions[firstIndex]) * holdBlend;
+        positions[firstIndex + 1] += (midY - positions[firstIndex + 1]) * holdBlend;
+        positions[firstIndex + 2] += (midZ - positions[firstIndex + 2]) * holdBlend;
+      }
+      if (!pinnedFlags[second]) {
+        positions[secondIndex] += (midX - positions[secondIndex]) * holdBlend;
+        positions[secondIndex + 1] += (midY - positions[secondIndex + 1]) * holdBlend;
+        positions[secondIndex + 2] += (midZ - positions[secondIndex + 2]) * holdBlend;
+      }
+
+      // Dampen relative seam velocity so closed seams stay closed.
+      const invLength = 1 / Math.max(1e-6, currentLength);
+      const dirX = dx * invLength;
+      const dirY = dy * invLength;
+      const dirZ = dz * invLength;
+      const relVx = velocities[firstIndex] - velocities[secondIndex];
+      const relVy = velocities[firstIndex + 1] - velocities[secondIndex + 1];
+      const relVz = velocities[firstIndex + 2] - velocities[secondIndex + 2];
+      const seamRelVel = relVx * dirX + relVy * dirY + relVz * dirZ;
+      if (seamRelVel > 0) {
+        const damp = Math.min(0.75, seamRelVel * 0.5);
+        if (!pinnedFlags[first]) {
+          velocities[firstIndex] -= dirX * damp;
+          velocities[firstIndex + 1] -= dirY * damp;
+          velocities[firstIndex + 2] -= dirZ * damp;
+        }
+        if (!pinnedFlags[second]) {
+          velocities[secondIndex] += dirX * damp;
+          velocities[secondIndex + 1] += dirY * damp;
+          velocities[secondIndex + 2] += dirZ * damp;
+        }
+      }
+    }
+  };
+
   const stitchPairCount = Math.floor(stitchPairs.length / 2);
+  let maxSeamStretchRatio = 0;
   let currentStitchPairPhase = stitchPairCount > 0
     ? (((Number(stitchPairPhase) || 0) % stitchPairCount) + stitchPairCount) % stitchPairCount
     : 0;
@@ -2072,17 +2747,19 @@ function stepGarmentSimulation(deltaSeconds) {
       positions[index + 1] += velocities[index + 1];
       positions[index + 2] += velocities[index + 2];
 
-      // Seam vertices must not be pulled back to base — let stitch forces close the panels.
-      const vertMemory = seamVertexFlags[vertex] ? 0 : memory;
-      positions[index] += (basePositions[index] - positions[index]) * vertMemory;
-      positions[index + 1] += (basePositions[index + 1] - positions[index + 1]) * vertMemory;
-      positions[index + 2] += (basePositions[index + 2] - positions[index + 2]) * (vertMemory * 0.45);
+      // Remove memory term for seam vertices entirely: let stitch forces pull seam vertices as far as possible.
+      if (!seamVertexFlags[vertex]) {
+        positions[index] += (basePositions[index] - positions[index]) * memory;
+        positions[index + 1] += (basePositions[index + 1] - positions[index + 1]) * memory;
+        positions[index + 2] += (basePositions[index + 2] - positions[index + 2]) * (memory * 0.45);
+      }
 
       const dxFromBase = positions[index] - basePositions[index];
       const dyFromBase = positions[index + 1] - basePositions[index + 1];
       const dzFromBase = positions[index + 2] - basePositions[index + 2];
       const displacement = Math.sqrt(dxFromBase * dxFromBase + dyFromBase * dyFromBase + dzFromBase * dzFromBase);
-      const maxDisplacement = 0.20;
+      // Seam vertices need much more range to travel around the body; non-seam vertices stay tightly anchored.
+      const maxDisplacement = seamVertexFlags[vertex] ? 0.55 : 0.20;
       if (displacement > maxDisplacement) {
         const pullback = maxDisplacement / Math.max(1e-5, displacement);
         positions[index] = basePositions[index] + dxFromBase * pullback;
@@ -2095,8 +2772,8 @@ function stepGarmentSimulation(deltaSeconds) {
     }
 
     // Spring seam forces pull stitched panel edges together while preserving natural motion.
-    const seamSpringStiffness = 0.9 * deltaScale;
-    const seamSpringDamping = 0.5;
+    const seamSpringStiffness = 6.0 * deltaScale;
+    const seamSpringDamping = 1.2;
     for (let pairOrder = 0; pairOrder < stitchPairCount; pairOrder += 1) {
       const pair = ((pairOrder + currentStitchPairPhase) % stitchPairCount) * 2;
       const first = Number(stitchPairs[pair]);
@@ -2124,6 +2801,10 @@ function stepGarmentSimulation(deltaSeconds) {
       const seamRelativeVelocity = relVx * dirX + relVy * dirY + relVz * dirZ;
 
       const stretch = currentLength - restLength;
+      if (restLength > 1e-5 && stretch > 0) {
+        const stretchRatio = stretch / restLength;
+        if (stretchRatio > maxSeamStretchRatio) maxSeamStretchRatio = stretchRatio;
+      }
       const seamImpulse = stretch * seamSpringStiffness + seamRelativeVelocity * seamSpringDamping;
       const impulseX = dirX * seamImpulse;
       const impulseY = dirY * seamImpulse;
@@ -2150,8 +2831,9 @@ function stepGarmentSimulation(deltaSeconds) {
     }
 
     // One collision pass before constraint solving — prevents cloth starting inside body
-    if (ENABLE_BODY_COLLISION_IN_FIT_PREVIEW) {
-      applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount, bodyCloud);
+    applyActiveBodyCollision(false);
+    if (isLowerBodyGarment) {
+      applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
     }
 
     for (let iteration = 0; iteration < stretchIterations; iteration += 1) {
@@ -2160,14 +2842,20 @@ function stepGarmentSimulation(deltaSeconds) {
     for (let iteration = 0; iteration < bendIterations; iteration += 1) {
       solveDistancePairs(bendPairs, bendRestLengths, 0.32);
     }
-
-    for (let iteration = 0; iteration < stitchIterations; iteration += 1) {
+    for (let iteration = 0; iteration < stitchIterations * 2; iteration += 1) {
       solveStitchPairsGlobal(1.0, currentStitchPairPhase + iteration);
+      // For top garments, interleave body collision every 8 stitch iterations so the stitch
+      // can dominate and pull seams together unless truly blocked by the body.
+      if (isTopGarment && bodyCloud && iteration % 8 === 7) {
+        applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount, bodyCloud);
+      }
     }
 
-    // One collision pass after all constraints — corrects any penetration from constraint solving
-    if (ENABLE_BODY_COLLISION_IN_FIT_PREVIEW) {
-      applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount, bodyCloud);
+    // Multi-pass collision flush after stitch block: for tops use 3 passes (same as final),
+    // for lower-body use 1.  This catches any residual penetration before self-collision runs.
+    applyActiveBodyCollision(isTopGarment);
+    if (isLowerBodyGarment) {
+      applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
     }
 
     const minSeparation = 0.012;
@@ -2202,7 +2890,7 @@ function stepGarmentSimulation(deltaSeconds) {
         const correction = (minSeparation - distance) / distance;
         const pushX = dx * correction * 0.28;
         const pushY = dy * correction * 0.28;
-        const pushZ = dz * correction * 0.45;
+        const pushZ = dz * correction * (isLowerBodyGarment ? 0.32 : 0.45);
 
         if (!pinnedFlags[first]) {
           positions[firstIndex] += pushX;
@@ -2219,20 +2907,77 @@ function stepGarmentSimulation(deltaSeconds) {
     }
 
     // Self-collision can push vertices into the body; resolve immediately before seam coupling.
-    if (ENABLE_BODY_COLLISION_IN_FIT_PREVIEW) {
-      applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount, bodyCloud);
+    applyActiveBodyCollision(false);
+    if (isLowerBodyGarment) {
+      applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
     }
 
     // Couple seam pull and collision in the same terminal loop so both effects happen simultaneously.
-    // Use tangentially-biased stitch solving so seams can travel around the body surface
-    // instead of trying to pull straight through the collision volume.
-    for (let iteration = 0; iteration < coupledTerminalIterations; iteration += 1) {
-      solveStitchPairsAroundCollisionBody(1.2, 0.62, 1.0, currentStitchPairPhase + iteration);
+    // Near the body the Z-weight is nearly zeroed (0.08) so stitch force acts almost purely in X/Y —
+    // this forces the seam to travel AROUND the body sides rather than tunnel straight through it.
+    for (let iteration = 0; iteration < coupledTerminalIterations * 2; iteration += 1) {
+      // Use a higher Z-weight near collision so seam can still pull panels together even if close to the body.
+      solveStitchPairsAroundCollisionBody(2.0, 0.35, 1.0, currentStitchPairPhase + iteration);
+      applyActiveBodyCollision(false);
+      if (isLowerBodyGarment) {
+        applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
+      }
     }
 
-    // Final collision pass after all constraint + seam solving
-    if (ENABLE_BODY_COLLISION_IN_FIT_PREVIEW) {
-      applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount, bodyCloud);
+    // Hard seam midpoint projection: run multiple iterations to pull seam pairs as close as
+    // possible, interleaved with collision so they stop AT the body surface and stay there.
+    for (let iteration = 0; iteration < 6; iteration += 1) {
+      for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
+        const first = Number(stitchPairs[pair]);
+        const second = Number(stitchPairs[pair + 1]);
+        if (!Number.isInteger(first) || !Number.isInteger(second) || first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+        if (pinnedFlags[first] && pinnedFlags[second]) continue;
+        const fi = first * 3, si = second * 3;
+        const midX = (positions[fi]     + positions[si])     * 0.5;
+        const midY = (positions[fi + 1] + positions[si + 1]) * 0.5;
+        const midZ = (positions[fi + 2] + positions[si + 2]) * 0.5;
+        // Strong blend: pull hard toward midpoint each iteration.
+        const blend = 0.82;
+        if (!pinnedFlags[first]) {
+          positions[fi]     += (midX - positions[fi])     * blend;
+          positions[fi + 1] += (midY - positions[fi + 1]) * blend;
+          positions[fi + 2] += (midZ - positions[fi + 2]) * blend;
+        }
+        if (!pinnedFlags[second]) {
+          positions[si]     += (midX - positions[si])     * blend;
+          positions[si + 1] += (midY - positions[si + 1]) * blend;
+          positions[si + 2] += (midZ - positions[si + 2]) * blend;
+        }
+      }
+      // Interleave collision every 2 iterations so seam stops at body surface.
+      if (iteration % 2 === 1) {
+        applyActiveBodyCollision(false);
+        if (isLowerBodyGarment) {
+          applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
+        }
+      }
+    }
+
+    holdClosedSeams();
+
+    // Final collision pass after all constraints + seam solving.
+    applyActiveBodyCollision(true);
+    if (isLowerBodyGarment) {
+      applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
+    }
+
+    // For top garments: hard clamp so no free vertex can rise above the shoulder/collar line.
+    // This stops the fabric from drifting up over the head ("consuming the head").
+    if (isTopGarment && Number.isFinite(maxPinnedY)) {
+      const headCap = maxPinnedY + 0.008;
+      for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+        if (pinnedFlags[vertex]) continue;
+        const vi = vertex * 3 + 1;
+        if (positions[vi] > headCap) {
+          positions[vi] = headCap;
+          if (velocities[vi] > 0) velocities[vi] = 0;
+        }
+      }
     }
 
     if (stitchPairCount > 0) {
@@ -2241,7 +2986,22 @@ function stepGarmentSimulation(deltaSeconds) {
   }
 
   positionAttr.needsUpdate = true;
+
   state.stitchPairPhase = currentStitchPairPhase;
+  if (seamMaterial?.isMaterial) {
+    const threshold = 0.2;
+    const full = 0.55;
+    const normalized = Math.max(0, Math.min(1, (maxSeamStretchRatio - threshold) / Math.max(1e-5, full - threshold)));
+    const smooth = state.seamStretchVisual * 0.72 + normalized * 0.28;
+    state.seamStretchVisual = smooth;
+    if (seamMaterial.emissive && typeof seamMaterial.emissive.setRGB === 'function') {
+      seamMaterial.emissive.setRGB(0.95 * smooth, 0.12 * smooth, 0.06 * smooth);
+      seamMaterial.emissiveIntensity = 0.25 + smooth * 0.95;
+    }
+    if (seamMaterial.color && typeof seamMaterial.color.setRGB === 'function') {
+      seamMaterial.color.setRGB(0.56 + smooth * 0.36, 0.56 - smooth * 0.2, 0.6 - smooth * 0.36);
+    }
+  }
   state.frame += 1;
   const normalRecomputeInterval = isInteractiveSolve ? 6 : (largeMesh ? 4 : 3);
   if (state.frame % normalRecomputeInterval === 0) {
@@ -2282,12 +3042,54 @@ function setGeneratedGarmentMesh(modelPayload) {
       generatedGarmentMesh.userData.garmentPayload = modelPayload;
       generatedGarmentMesh.name = 'GeneratedGarmentGLB';
       generatedGarmentMesh.position.set(0, 0, 0);
+      const glbGarmentType = String(modelPayload.garmentType || getSelectedGarmentType() || '').toLowerCase();
+      const ignoreAlphaForTop = glbGarmentType === 'shirt'
+        || glbGarmentType === 'tshirt'
+        || glbGarmentType === 'blouse'
+        || glbGarmentType === 'jacket'
+        || glbGarmentType === 'hoodie'
+        || glbGarmentType === 'sweater'
+        || glbGarmentType === 'coat'
+        || glbGarmentType === 'suit';
       generatedGarmentMesh.traverse((child) => {
         if (!child?.isMesh) return;
         if (!child.material) {
           child.material = createGarmentMaterial(modelPayload.textureDataUrl || null);
         }
+        if (Array.isArray(child.material)) {
+          child.material.forEach((material) => {
+            if (!material) return;
+            material.side = THREE_LIB.DoubleSide;
+            if (ignoreAlphaForTop && material.map) {
+              material.alphaMap = null;
+              material.transparent = false;
+              material.alphaTest = 0;
+            } else if (material.map) {
+              material.transparent = true;
+              material.alphaTest = 0.01;
+            } else {
+              material.transparent = false;
+              material.alphaTest = 0;
+            }
+            material.opacity = 1;
+            material.depthWrite = true;
+          });
+          return;
+        }
         child.material.side = THREE_LIB.DoubleSide;
+        if (ignoreAlphaForTop && child.material.map) {
+          child.material.alphaMap = null;
+          child.material.transparent = false;
+          child.material.alphaTest = 0;
+        } else if (child.material.map) {
+          child.material.transparent = true;
+          child.material.alphaTest = 0.01;
+        } else {
+          child.material.transparent = false;
+          child.material.alphaTest = 0;
+        }
+        child.material.opacity = 1;
+        child.material.depthWrite = true;
       });
 
       const bounds = new THREE_LIB.Box3().setFromObject(generatedGarmentMesh);
@@ -2300,6 +3102,10 @@ function setGeneratedGarmentMesh(modelPayload) {
       if (currentModel) alignGarmentToCurrentModel();
       startGarmentSimulation(modelPayload);
       if (!currentModel) fitModelToView(generatedGarmentMesh);
+      if (clothingOverlay) {
+        clothingOverlay.hidden = true;
+      }
+      currentGarmentCutout = null;
       setPreviewBackground(true);
       if (previewHint) {
         previewHint.hidden = true;
@@ -2310,6 +3116,9 @@ function setGeneratedGarmentMesh(modelPayload) {
       });
     }, undefined, (error) => {
       console.error('Failed to parse generated garment GLB:', error);
+      if (clothingOverlay) {
+        clothingOverlay.hidden = false;
+      }
       updateDebugPanel('GLB parse/render failed.', {
         error: error?.message || String(error),
       });
@@ -2336,11 +3145,35 @@ function setGeneratedGarmentMesh(modelPayload) {
   geometry.clearGroups();
   geometry.computeVertexNormals();
 
-  const mainMaterial = createGarmentMaterial(modelPayload.textureDataUrl || null);
   const garmentColor = modelPayload.garmentColor;
   const seamColor = garmentColor
     ? ((Number(garmentColor.r) & 0xff) << 16) | ((Number(garmentColor.g) & 0xff) << 8) | (Number(garmentColor.b) & 0xff)
     : 0x8a8f99;
+  const garmentType = String(modelPayload.garmentType || getSelectedGarmentType() || '').toLowerCase();
+  const ignoreAlphaForTop = garmentType === 'shirt'
+    || garmentType === 'tshirt'
+    || garmentType === 'blouse'
+    || garmentType === 'jacket'
+    || garmentType === 'hoodie'
+    || garmentType === 'sweater'
+    || garmentType === 'coat'
+    || garmentType === 'suit';
+  const mainMaterial = createGarmentMaterial(modelPayload.textureDataUrl || null);
+  if (mainMaterial?.isMeshStandardMaterial) {
+    if (ignoreAlphaForTop && mainMaterial.map) {
+      mainMaterial.alphaMap = null;
+      mainMaterial.transparent = false;
+      mainMaterial.alphaTest = 0;
+    } else if (mainMaterial.map) {
+      mainMaterial.transparent = true;
+      mainMaterial.alphaTest = 0.01;
+    } else {
+      mainMaterial.transparent = false;
+      mainMaterial.alphaTest = 0;
+    }
+    mainMaterial.opacity = 1;
+    mainMaterial.depthWrite = true;
+  }
   const seamMaterial = createGarmentMaterial(null, { color: seamColor, useTexture: false });
   seamMaterial.roughness = 0.92;
   seamMaterial.metalness = 0.01;
@@ -2362,6 +3195,9 @@ function setGeneratedGarmentMesh(modelPayload) {
 
   generatedGarmentMesh = new THREE_LIB.Mesh(geometry, seamWallIndexCount > 0 ? [mainMaterial, seamMaterial] : mainMaterial);
   generatedGarmentMesh.userData.garmentPayload = modelPayload;
+  if (seamWallIndexCount > 0) {
+    generatedGarmentMesh.userData.seamMaterial = seamMaterial;
+  }
   generatedGarmentMesh.name = 'GeneratedGarmentMesh';
   generatedGarmentMesh.position.set(0, 0, 0);
 
@@ -2375,6 +3211,10 @@ function setGeneratedGarmentMesh(modelPayload) {
   if (currentModel) alignGarmentToCurrentModel();
   startGarmentSimulation(modelPayload);
   if (!currentModel) fitModelToView(generatedGarmentMesh);
+  if (clothingOverlay) {
+    clothingOverlay.hidden = true;
+  }
+  currentGarmentCutout = null;
   setPreviewBackground(true);
   if (previewHint) {
     previewHint.hidden = true;
@@ -2838,14 +3678,8 @@ function renderSizeButtons(sizes) {
     sizeButtons.appendChild(createSizeButton(size));
   });
 
-  // Auto-select middle size
-  if (uniqueSizes.length > 0) {
-    const middleIndex = Math.floor(uniqueSizes.length / 2);
-    const middleButton = sizeButtons.querySelector(`button:nth-child(${middleIndex + 1})`);
-    if (middleButton) {
-      middleButton.click();
-    }
-  }
+  // Do not auto-apply a size. Keep the generated outline-driven mesh unchanged
+  // until the user explicitly chooses a size to avoid involuntary bloating.
 }
 
 function loadScanFile(file) {
@@ -2983,9 +3817,11 @@ async function analyzeImages(files, type, garmentType = null) {
     formData.append('garmentType', garmentType);
   }
 
-  const response = await fetch(`${BACKEND_URL}/analyze-image`, {
+  const cacheBust = Date.now();
+  const response = await fetch(`${BACKEND_URL}/analyze-image?cb=${cacheBust}`, {
     method: 'POST',
     body: formData,
+    cache: 'no-store',
   });
 
   if (!response.ok) {
@@ -3074,6 +3910,7 @@ if (clothingOverlay) {
 
 if (analyzeButton) {
   analyzeButton.addEventListener('click', async () => {
+    const requestId = ++analyzeRequestId;
     analysisResults.innerHTML = '';
     analyzeStatus.textContent = '';
     currentClothingSizeValue = null;
@@ -3111,8 +3948,6 @@ if (analyzeButton) {
 
       if (clothingResult.garmentModel) {
         setGeneratedGarmentMesh(clothingResult.garmentModel);
-        clothingOverlay.hidden = true;
-        currentGarmentCutout = null;
       } else if (clothingResult.processedImageUrl) {
         clearGeneratedGarmentMesh();
         setCutoutOverlay(clothingResult.processedImageUrl, clothingResult.cutout);
@@ -3123,36 +3958,48 @@ if (analyzeButton) {
         updateDebugPanel('Fallback to original clothing overlay (no generated model).');
       }
 
-      let sizeGuideAnalyses = [];
-      let mergedSizes = [];
-
-      if (sizeGuideFiles.length > 0) {
-        const sizeGuideResult = await analyzeImages(sizeGuideFiles, 'sizeGuide', garmentType);
-        sizeGuideAnalyses = sizeGuideResult.sizeGuideEntries
-          ? sizeGuideResult.sizeGuideEntries.map((entry) => entry.analysis)
-          : (sizeGuideResult.analyses || (sizeGuideResult.analysis ? [sizeGuideResult.analysis] : []));
-        mergedSizes = sizeGuideResult.sizes || sortSizes(dedupeSizes(sizeGuideResult.rawSizeEntries || []));
-      }
-
       analysisResults.innerHTML = `
         <div>
           <h4>Clothing Image Analysis</h4>
           <pre>${formatAnalysis('Clothing Image', clothingResult.analysis)}</pre>
         </div>
-        ${sizeGuideAnalyses.length > 0 ? sizeGuideAnalyses
-          .map((analysis, index) => `
-            <div style="margin-top: 1.25rem;">
-              <h4>Size Guide Analysis ${sizeGuideAnalyses.length > 1 ? `(${index + 1})` : ''}</h4>
-              <pre>${formatAnalysis('Size Guide Image', analysis)}</pre>
-            </div>
-          `)
-          .join('') : ''}
       `;
 
       if (sizeGuideFiles.length > 0) {
-        console.log('About to render sizes:', mergedSizes);
-        renderSizeButtons(mergedSizes);
-        analyzeStatus.textContent = 'Analysis complete.';
+        analyzeStatus.textContent = 'Garment preview ready. Processing size guide in background...';
+
+        (async () => {
+          try {
+            const sizeGuideResult = await analyzeImages(sizeGuideFiles, 'sizeGuide', garmentType);
+            if (requestId !== analyzeRequestId) return;
+
+            const sizeGuideAnalyses = sizeGuideResult.sizeGuideEntries
+              ? sizeGuideResult.sizeGuideEntries.map((entry) => entry.analysis)
+              : (sizeGuideResult.analyses || (sizeGuideResult.analysis ? [sizeGuideResult.analysis] : []));
+            const mergedSizes = sizeGuideResult.sizes || sortSizes(dedupeSizes(sizeGuideResult.rawSizeEntries || []));
+
+            if (sizeGuideAnalyses.length > 0) {
+              analysisResults.innerHTML += sizeGuideAnalyses
+                .map((analysis, index) => `
+                  <div style="margin-top: 1.25rem;">
+                    <h4>Size Guide Analysis ${sizeGuideAnalyses.length > 1 ? `(${index + 1})` : ''}</h4>
+                    <pre>${formatAnalysis('Size Guide Image', analysis)}</pre>
+                  </div>
+                `)
+                .join('');
+            }
+
+            console.log('About to render sizes:', mergedSizes);
+            renderSizeButtons(mergedSizes);
+            analyzeStatus.textContent = 'Analysis complete.';
+          } catch (sizeGuideError) {
+            if (requestId !== analyzeRequestId) return;
+            analyzeStatus.textContent = `Garment preview ready. Size guide parsing failed: ${sizeGuideError.message}`;
+            if (sizeButtons) {
+              sizeButtons.innerHTML = '';
+            }
+          }
+        })();
       } else {
         if (sizeButtons) {
           sizeButtons.innerHTML = '';
