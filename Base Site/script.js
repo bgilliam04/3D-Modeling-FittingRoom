@@ -96,6 +96,20 @@ let simulationBoundsWorldBox = null;
 let simulationBoundsToLocalMatrix = null;
 const ENABLE_BODY_COLLISION_IN_FIT_PREVIEW = true;
 
+// Seam stitching system
+let garmentPanels = {
+  front: null,
+  back: null,
+  seams: [],
+  fabricProperties: {
+    maxStretch: 0.15,  // Muslin ~15% stretch
+    elasticity: 0.8
+  }
+};
+
+let seamConstraints = [];
+let needsSeamRecalculation = false;
+
 function computeBoundsExcludingRoot(root, excludeRoot, outBox, localSpaceRoot = null) {
   if (!THREE_LIB || !outBox) return null;
   outBox.makeEmpty();
@@ -2275,6 +2289,153 @@ function applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, 
   return contacts;
 }
 
+function mirrorPanelBehindBody(frontPanelMesh) {
+  if (!THREE_LIB || !frontPanelMesh) return null;
+  
+  const backPanelMesh = frontPanelMesh.clone();
+  backPanelMesh.scale.x *= -1;
+  backPanelMesh.position.z = -0.1;
+  
+  return backPanelMesh;
+}
+
+function checkCollisionWithBody(rayOrigin, rayDirection, bodyMesh) {
+  if (!THREE_LIB || !bodyMesh) return null;
+  
+  const raycaster = new THREE.Raycaster();
+  raycaster.ray.origin.copy(rayOrigin);
+  raycaster.ray.direction.copy(rayDirection).normalize();
+  
+  const intersections = raycaster.intersectObject(bodyMesh, true);
+  
+  if (intersections.length > 0) {
+    return {
+      distance: intersections[0].distance,
+      point: intersections[0].point,
+      normal: intersections[0].face.normal
+    };
+  }
+  
+  return null;
+}
+
+function updateSeamConstraints(deltaTime, bodyMesh) {
+  if (!seamConstraints.length || !bodyMesh) return;
+  
+  for (const seam of seamConstraints) {
+    if (seam.isFrozen) continue;
+    
+    const panelA = garmentPanels[seam.panelA];
+    const panelB = garmentPanels[seam.panelB];
+    if (!panelA?.geometry || !panelB?.geometry) continue;
+    
+    const positionsA = panelA.geometry.attributes.position.array;
+    const positionsB = panelB.geometry.attributes.position.array;
+    
+    for (let i = 0; i < seam.vertexIndicesA.length; i++) {
+      const idxA = seam.vertexIndicesA[i];
+      const idxB = seam.vertexIndicesB[i];
+      
+      const vA = new THREE.Vector3(
+        positionsA[idxA * 3],
+        positionsA[idxA * 3 + 1],
+        positionsA[idxA * 3 + 2]
+      ).applyMatrix4(panelA.matrixWorld);
+      
+      const vB = new THREE.Vector3(
+        positionsB[idxB * 3],
+        positionsB[idxB * 3 + 1],
+        positionsB[idxB * 3 + 2]
+      ).applyMatrix4(panelB.matrixWorld);
+      
+      const seamGap = vA.clone().sub(vB);
+      const gapDistance = seamGap.length();
+      
+      if (gapDistance < 0.001) continue;
+      
+      const midpoint = vA.clone().add(vB).multiplyScalar(0.5);
+      const closingDirection = seamGap.normalize();
+      
+      const collision = checkCollisionWithBody(midpoint, closingDirection, bodyMesh);
+      
+      if (collision) {
+        seam.collisionDistances[i] = collision.distance;
+        seam.isFrozen = true;
+        continue;
+      }
+      
+      const originalEdgeLength = seam.originalEdgeLengths?.[i] || gapDistance;
+      const currentPull = (originalEdgeLength - gapDistance) / originalEdgeLength;
+      
+      if (currentPull >= seam.maxContraction) {
+        seam.isFrozen = true;
+        seam.currentContraction = seam.maxContraction;
+        continue;
+      }
+      
+      const pullStrength = 0.1 * deltaTime;
+      const pullVec = seamGap.clone().multiplyScalar(pullStrength * 0.5);
+      vA.sub(pullVec);
+      vB.add(pullVec);
+    }
+  }
+  
+  if (garmentPanels.front?.geometry) {
+    garmentPanels.front.geometry.attributes.position.needsUpdate = true;
+  }
+  if (garmentPanels.back?.geometry) {
+    garmentPanels.back.geometry.attributes.position.needsUpdate = true;
+  }
+}
+
+function recalculateSeamFeasibility() {
+  // Called when garment is dragged—check if frozen seams can resume
+  for (const seam of seamConstraints) {
+    if (!seam.isFrozen) continue;
+    
+    let canResume = false;
+    const panelA = garmentPanels[seam.panelA];
+    const panelB = garmentPanels[seam.panelB];
+    
+    if (panelA?.geometry && panelB?.geometry) {
+      const positionsA = panelA.geometry.attributes.position.array;
+      const positionsB = panelB.geometry.attributes.position.array;
+      
+      for (let i = 0; i < seam.vertexIndicesA.length; i++) {
+        const idxA = seam.vertexIndicesA[i];
+        const idxB = seam.vertexIndicesB[i];
+        
+        const vA = new THREE.Vector3(
+          positionsA[idxA * 3],
+          positionsA[idxA * 3 + 1],
+          positionsA[idxA * 3 + 2]
+        ).applyMatrix4(panelA.matrixWorld);
+        
+        const vB = new THREE.Vector3(
+          positionsB[idxB * 3],
+          positionsB[idxB * 3 + 1],
+          positionsB[idxB * 3 + 2]
+        ).applyMatrix4(panelB.matrixWorld);
+        
+        const collision = checkCollisionWithBody(
+          vA.clone().add(vB).multiplyScalar(0.5),
+          vA.clone().sub(vB).normalize(),
+          currentModel
+        );
+        
+        if (!collision) {
+          canResume = true;
+          break;
+        }
+      }
+    }
+    
+    if (canResume) {
+      seam.isFrozen = false;
+    }
+  }
+}
+
 function stepGarmentSimulation(deltaSeconds) {
   if (!THREE_LIB || !garmentSimulationState || !generatedGarmentMesh || !currentModel) {
     garmentSimulationState = null;
@@ -2990,6 +3151,10 @@ function stepGarmentSimulation(deltaSeconds) {
     if (stitchPairCount > 0) {
       currentStitchPairPhase = (currentStitchPairPhase + 1) % stitchPairCount;
     }
+  }
+
+  if (garmentPanels.front && garmentPanels.back && seamConstraints.length > 0) {
+    updateSeamConstraints(deltaSeconds, currentModel);
   }
 
   positionAttr.needsUpdate = true;
@@ -3909,9 +4074,13 @@ if (clothingOverlay) {
   });
 
   document.addEventListener('mouseup', () => {
-    isResizingClothing = false;
-    isDraggingClothing = false;
-    clothingOverlay.classList.remove('dragging');
+    if (!isDraggingPreviewGarment) {
+      return;
+    }
+    isDraggingPreviewGarment = false;
+    // NEW: Recalculate seams when garment movement stops
+    needsSeamRecalculation = true;
+    recalculateSeamFeasibility();
   });
 }
 
