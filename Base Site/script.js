@@ -2638,6 +2638,90 @@ function stepGarmentSimulation(deltaSeconds) {
     }
   };
 
+  const seamPairRaycaster = new THREE_LIB.Raycaster();
+  const seamSegA = new THREE_LIB.Vector3();
+  const seamSegB = new THREE_LIB.Vector3();
+  const seamSegDir = new THREE_LIB.Vector3();
+  const SEAM_SEGMENT_BODY_PADDING = 0.02;
+
+  const lockSeamPair = (pairIndex, firstIndex, secondIndex) => {
+    if (seamBarrierLockedPairs instanceof Uint8Array && pairIndex >= 0 && pairIndex < seamBarrierLockedPairs.length) {
+      seamBarrierLockedPairs[pairIndex] = 1;
+    }
+
+    if (!Number.isFinite(firstIndex) || !Number.isFinite(secondIndex)) return;
+
+    const dx = positions[firstIndex] - positions[secondIndex];
+    const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
+    const dz = positions[firstIndex + 2] - positions[secondIndex + 2];
+    const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (length <= 1e-6) return;
+    const invLength = 1 / length;
+    const dirX = dx * invLength;
+    const dirY = dy * invLength;
+    const dirZ = dz * invLength;
+    const relVx = velocities[firstIndex] - velocities[secondIndex];
+    const relVy = velocities[firstIndex + 1] - velocities[secondIndex + 1];
+    const relVz = velocities[firstIndex + 2] - velocities[secondIndex + 2];
+    const seamRelVel = relVx * dirX + relVy * dirY + relVz * dirZ;
+    if (seamRelVel <= 0) return;
+
+    const damp = Math.min(0.9, seamRelVel * 0.75);
+    velocities[firstIndex] -= dirX * damp * 0.5;
+    velocities[firstIndex + 1] -= dirY * damp * 0.5;
+    velocities[firstIndex + 2] -= dirZ * damp * 0.5;
+    velocities[secondIndex] += dirX * damp * 0.5;
+    velocities[secondIndex + 1] += dirY * damp * 0.5;
+    velocities[secondIndex + 2] += dirZ * damp * 0.5;
+  };
+
+  const seamSegmentCrossesBody = (firstIndex, secondIndex) => {
+    if (!currentModel) return false;
+
+    const ax = positions[firstIndex];
+    const ay = positions[firstIndex + 1];
+    const az = positions[firstIndex + 2];
+    const bx = positions[secondIndex];
+    const by = positions[secondIndex + 1];
+    const bz = positions[secondIndex + 2];
+
+    if (bodyCloud) {
+      const minX = Math.min(ax, bx);
+      const maxX = Math.max(ax, bx);
+      const minY = Math.min(ay, by);
+      const maxY = Math.max(ay, by);
+      const minZ = Math.min(az, bz);
+      const maxZ = Math.max(az, bz);
+
+      if (
+        maxX < bodyCloud.mnX - SEAM_SEGMENT_BODY_PADDING ||
+        minX > bodyCloud.mxX + SEAM_SEGMENT_BODY_PADDING ||
+        maxY < bodyCloud.mnY - SEAM_SEGMENT_BODY_PADDING ||
+        minY > bodyCloud.mxY + SEAM_SEGMENT_BODY_PADDING ||
+        maxZ < bodyCloud.mnZ - SEAM_SEGMENT_BODY_PADDING ||
+        minZ > bodyCloud.mxZ + SEAM_SEGMENT_BODY_PADDING
+      ) {
+        return false;
+      }
+    }
+
+    seamSegA.set(ax, ay, az);
+    seamSegB.set(bx, by, bz);
+    simulationMesh.localToWorld(seamSegA);
+    simulationMesh.localToWorld(seamSegB);
+
+    seamSegDir.copy(seamSegB).sub(seamSegA);
+    const segmentLength = seamSegDir.length();
+    if (segmentLength < 1e-4) return false;
+    seamSegDir.multiplyScalar(1 / segmentLength);
+
+    seamPairRaycaster.set(seamSegA, seamSegDir);
+    seamPairRaycaster.near = 1e-4;
+    seamPairRaycaster.far = Math.max(1e-4, segmentLength - 1e-4);
+    const intersections = seamPairRaycaster.intersectObject(currentModel, true);
+    return intersections.length > 0;
+  };
+
   const solveDistancePairs = (pairs, pairRestLengths, stiffness, pairOffset = 0) => {
     const pairCount = Math.floor(pairs.length / 2);
     if (pairCount <= 0) return;
@@ -2708,6 +2792,10 @@ function stepGarmentSimulation(deltaSeconds) {
 
       const firstIndex = first * 3;
       const secondIndex = second * 3;
+      if (seamSegmentCrossesBody(firstIndex, secondIndex)) {
+        lockSeamPair(pair / 2, firstIndex, secondIndex);
+        continue;
+      }
 
       const dx = positions[firstIndex] - positions[secondIndex];
       const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
@@ -2796,6 +2884,10 @@ function stepGarmentSimulation(deltaSeconds) {
 
       const firstIndex = first * 3;
       const secondIndex = second * 3;
+      if (seamSegmentCrossesBody(firstIndex, secondIndex)) {
+        lockSeamPair(pair / 2, firstIndex, secondIndex);
+        continue;
+      }
 
       const dx = positions[firstIndex] - positions[secondIndex];
       const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
@@ -2819,7 +2911,7 @@ function stepGarmentSimulation(deltaSeconds) {
       if (currentLength < 1e-6) continue;
       if (currentLength <= restLength) continue;
       if (blockedByCollision && currentLength > restLength + 0.006 && seamBarrierLockedPairs instanceof Uint8Array) {
-        seamBarrierLockedPairs[pair / 2] = 1;
+        lockSeamPair(pair / 2, firstIndex, secondIndex);
         continue;
       }
 
@@ -2969,11 +3061,16 @@ function stepGarmentSimulation(deltaSeconds) {
       const first = Number(stitchPairs[pair]);
       const second = Number(stitchPairs[pair + 1]);
       const restLength = restLengths[pair / 2] || 0;
+      if (seamBarrierLockedPairs?.[pair / 2]) continue;
       if (restLength < 0) continue;
       if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
 
       const firstIndex = first * 3;
       const secondIndex = second * 3;
+      if (seamSegmentCrossesBody(firstIndex, secondIndex)) {
+        lockSeamPair(pair / 2, firstIndex, secondIndex);
+        continue;
+      }
       const dx = positions[firstIndex] - positions[secondIndex];
       const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
       const dz = positions[firstIndex + 2] - positions[secondIndex + 2];
@@ -3124,6 +3221,10 @@ function stepGarmentSimulation(deltaSeconds) {
         if (!Number.isInteger(first) || !Number.isInteger(second) || first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
         if (pinnedFlags[first] && pinnedFlags[second]) continue;
         const fi = first * 3, si = second * 3;
+        if (seamSegmentCrossesBody(fi, si)) {
+          lockSeamPair(pair / 2, fi, si);
+          continue;
+        }
         const midX = (positions[fi]     + positions[si])     * 0.5;
         const midY = (positions[fi + 1] + positions[si + 1]) * 0.5;
         const midZ = (positions[fi + 2] + positions[si + 2]) * 0.5;
