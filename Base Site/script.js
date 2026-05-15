@@ -848,6 +848,8 @@ function initModelViewer() {
     }
 
     isDraggingPreviewGarment = false;
+    needsSeamRecalculation = true;
+    recalculateSeamFeasibility();
     if (controls) {
       controls.enabled = true;
     }
@@ -1497,6 +1499,7 @@ function startGarmentSimulation(modelPayload) {
     stitchAccumDeltaZ: new Float32Array(vertexCount),
     stitchAccumWeight: new Float32Array(vertexCount),
     stitchTouchedVertices: new Int32Array(vertexCount),
+    seamBarrierLockedPairs: new Uint8Array(Math.floor(stitchPairs.length / 2)),
     seamStretchVisual: 0,
   };
 
@@ -1790,7 +1793,7 @@ function applyBodyMeshCollision(positions, velocities, pinnedFlags, vertexCount,
     mxZ,
   } = cloud;
 
-  const THICK = Math.max(0.028, cs * 0.55);
+  const THICK = Math.max(0.04, cs * 0.75);
   const centerX = (mnX + mxX) * 0.5;
   const centerY = (mnY + mxY) * 0.5;
   const centerZ = (mnZ + mxZ) * 0.5;
@@ -2389,6 +2392,12 @@ function updateSeamConstraints(deltaTime, bodyMesh) {
 }
 
 function recalculateSeamFeasibility() {
+  if (garmentSimulationState?.seamBarrierLockedPairs instanceof Uint8Array) {
+    garmentSimulationState.seamBarrierLockedPairs.fill(0);
+    needsSeamRecalculation = false;
+    return;
+  }
+
   // Called when garment is dragged—check if frozen seams can resume
   for (const seam of seamConstraints) {
     if (!seam.isFrozen) continue;
@@ -2471,8 +2480,14 @@ function stepGarmentSimulation(deltaSeconds) {
     stitchAccumDeltaZ,
     stitchAccumWeight,
     stitchTouchedVertices,
+    seamBarrierLockedPairs,
     maxPinnedY,
   } = state;
+
+  if (needsSeamRecalculation && seamBarrierLockedPairs instanceof Uint8Array) {
+    seamBarrierLockedPairs.fill(0);
+    needsSeamRecalculation = false;
+  }
 
   // Debug: Log average seam distance
   if (stitchPairs.length > 1) {
@@ -2687,6 +2702,7 @@ function stepGarmentSimulation(deltaSeconds) {
       const first = Number(stitchPairs[pair]);
       const second = Number(stitchPairs[pair + 1]);
       const restLength = restLengths[pair / 2] ?? 0;
+      if (seamBarrierLockedPairs?.[pair / 2]) continue;
       if (restLength < 0) continue;
       if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
 
@@ -2774,6 +2790,7 @@ function stepGarmentSimulation(deltaSeconds) {
       const first = Number(stitchPairs[pair]);
       const second = Number(stitchPairs[pair + 1]);
       const restLength = restLengths[pair / 2] ?? 0;
+      if (seamBarrierLockedPairs?.[pair / 2]) continue;
       if (restLength < 0) continue;
       if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
 
@@ -2801,6 +2818,10 @@ function stepGarmentSimulation(deltaSeconds) {
       const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (currentLength < 1e-6) continue;
       if (currentLength <= restLength) continue;
+      if (blockedByCollision && currentLength > restLength + 0.006 && seamBarrierLockedPairs instanceof Uint8Array) {
+        seamBarrierLockedPairs[pair / 2] = 1;
+        continue;
+      }
 
       const correction = ((currentLength - restLength) / currentLength) * stiffness;
       const correctionX = dx * correction;
@@ -2838,6 +2859,7 @@ function stepGarmentSimulation(deltaSeconds) {
     for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
       const first = Number(stitchPairs[pair]);
       const second = Number(stitchPairs[pair + 1]);
+      if (seamBarrierLockedPairs?.[pair / 2]) continue;
       if (!Number.isInteger(first) || !Number.isInteger(second)) continue;
       if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
 
@@ -3084,8 +3106,8 @@ function stepGarmentSimulation(deltaSeconds) {
     // Near the body the Z-weight is nearly zeroed (0.08) so stitch force acts almost purely in X/Y —
     // this forces the seam to travel AROUND the body sides rather than tunnel straight through it.
     for (let iteration = 0; iteration < coupledTerminalIterations * 2; iteration += 1) {
-      // Use a higher Z-weight near collision so seam can still pull panels together even if close to the body.
-      solveStitchPairsAroundCollisionBody(2.0, 0.35, 1.0, currentStitchPairPhase + iteration);
+      // Strongly reduce near-body Z pull so seams travel around the body instead of tunneling through it.
+      solveStitchPairsAroundCollisionBody(2.0, 0.12, 1.0, currentStitchPairPhase + iteration);
       applyActiveBodyCollision(false);
       if (isLowerBodyGarment) {
         applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
@@ -3096,6 +3118,7 @@ function stepGarmentSimulation(deltaSeconds) {
     // possible, interleaved with collision so they stop AT the body surface and stay there.
     for (let iteration = 0; iteration < 6; iteration += 1) {
       for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
+        if (seamBarrierLockedPairs?.[pair / 2]) continue;
         const first = Number(stitchPairs[pair]);
         const second = Number(stitchPairs[pair + 1]);
         if (!Number.isInteger(first) || !Number.isInteger(second) || first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
@@ -3117,16 +3140,20 @@ function stepGarmentSimulation(deltaSeconds) {
           positions[si + 2] += (midZ - positions[si + 2]) * blend;
         }
       }
-      // Interleave collision every 2 iterations so seam stops at body surface.
-      if (iteration % 2 === 1) {
-        applyActiveBodyCollision(false);
-        if (isLowerBodyGarment) {
-          applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
-        }
+      // Run collision every iteration so midpoint projection cannot tunnel through the body.
+      applyActiveBodyCollision(false);
+      if (isLowerBodyGarment) {
+        applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
       }
     }
 
     holdClosedSeams();
+
+    // Flush collisions again immediately after seam hold stabilization.
+    applyActiveBodyCollision(false);
+    if (isLowerBodyGarment) {
+      applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
+    }
 
     // Final collision pass after all constraints + seam solving.
     applyActiveBodyCollision(true);
@@ -3153,9 +3180,7 @@ function stepGarmentSimulation(deltaSeconds) {
     }
   }
 
-  if (garmentPanels.front && garmentPanels.back && seamConstraints.length > 0) {
-    updateSeamConstraints(deltaSeconds, currentModel);
-  }
+  // Incomplete external seamConstraints path is disabled to avoid conflicting seam/body resolution.
 
   positionAttr.needsUpdate = true;
 
