@@ -96,6 +96,239 @@ let simulationBoundsWorldBox = null;
 let simulationBoundsToLocalMatrix = null;
 const ENABLE_BODY_COLLISION_IN_FIT_PREVIEW = true;
 
+// ============================================================================
+// FABRIC PROPERTIES SYSTEM
+// ============================================================================
+
+const FABRIC_PROPERTIES = {
+  muslin: {
+    maxStretchRatio: 1.15,      // 15% stretch max (tight - natural muslin limit)
+    minStretchRatio: 0.92,      // Allow 8% compression
+    naturalCompressionFactor: 0.02,
+    stretchStiffness: 0.95,     // High stiffness = resists stretching
+    compressionStiffness: 0.85,
+    stitchStretchLimit: 1.08,   // Seams can only stretch 8%
+    description: 'Muslin - limited stretch, tight fit'
+  },
+  cotton: {
+    maxStretchRatio: 1.25,
+    minStretchRatio: 0.88,
+    naturalCompressionFactor: 0.03,
+    stretchStiffness: 0.80,
+    compressionStiffness: 0.75,
+    stitchStretchLimit: 1.12,
+    description: 'Cotton - moderate stretch'
+  },
+  knit: {
+    maxStretchRatio: 1.45,      // Knits stretch more
+    minStretchRatio: 0.78,
+    naturalCompressionFactor: 0.05,
+    stretchStiffness: 0.65,
+    compressionStiffness: 0.60,
+    stitchStretchLimit: 1.20,
+    description: 'Knit - high stretch, flexible'
+  },
+  silk: {
+    maxStretchRatio: 1.08,      // Delicate
+    minStretchRatio: 0.95,
+    naturalCompressionFactor: 0.01,
+    stretchStiffness: 0.98,
+    compressionStiffness: 0.92,
+    stitchStretchLimit: 1.05,
+    description: 'Silk - minimal stretch, delicate'
+  },
+  denim: {
+    maxStretchRatio: 1.18,      // Structured
+    minStretchRatio: 0.90,
+    naturalCompressionFactor: 0.015,
+    stretchStiffness: 0.92,
+    compressionStiffness: 0.88,
+    stitchStretchLimit: 1.10,
+    description: 'Denim - structured, limited stretch'
+  },
+};
+
+function getFabricProperties(garmentType = 'shirt') {
+  const fabricMap = {
+    shirt: 'cotton',
+    dress: 'cotton',
+    pants: 'denim',
+    skirt: 'cotton',
+    jacket: 'muslin',
+    shorts: 'cotton',
+    hoodie: 'knit',
+    sweater: 'knit',
+  };
+  const fabricType = fabricMap[garmentType] || 'cotton';
+  return { ...FABRIC_PROPERTIES[fabricType], type: fabricType };
+}
+
+// ============================================================================
+// STITCH CONSTRAINT STATE - Manages seam freezing when blocked by collision
+// ============================================================================
+
+class StitchConstraintState {
+  constructor(stitchPairs, restLengths) {
+    this.stitchPairs = stitchPairs;
+    this.restLengths = restLengths;
+    this.frozenPairs = new Set();      // Seam pair indices that are locked
+    this.frozenPositions = new Map();  // Vertex ID -> [x, y, z] frozen position
+    this.closureTolerance = 0.008;     // Seam is "closed" if vertices < 8mm apart
+    this.blockageFrameCount = new Map(); // Track frames each seam is blocked
+    this.lockFrameCount = 0;
+  }
+
+  /**
+   * Check if a seam pair vertices are close enough to be considered "closed"
+   */
+  isSeamClosed(positions, pairIndex, vertexCount) {
+    const first = Number(this.stitchPairs[pairIndex * 2]);
+    const second = Number(this.stitchPairs[pairIndex * 2 + 1]);
+    if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) {
+      return false;
+    }
+
+    const fi = first * 3;
+    const si = second * 3;
+    const dx = positions[fi] - positions[si];
+    const dy = positions[fi + 1] - positions[si + 1];
+    const dz = positions[fi + 2] - positions[si + 2];
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    
+    return distance < this.closureTolerance;
+  }
+
+  /**
+   * Track blocked seams and freeze them if blocked too long
+   */
+  updateBlockageAndFreeze(positions, collisionInfo, vertexCount, maxBlockedFrames = 18) {
+    const pairCount = Math.floor(this.stitchPairs.length / 2);
+    
+    for (let pairIdx = 0; pairIdx < pairCount; pairIdx++) {
+      if (this.frozenPairs.has(pairIdx)) continue; // Already frozen
+
+      const first = Number(this.stitchPairs[pairIdx * 2]);
+      const second = Number(this.stitchPairs[pairIdx * 2 + 1]);
+      
+      // Is this seam pair blocked by collision?
+      const isBlocked = collisionInfo?.blockedSeams?.has(pairIdx) || false;
+      
+      if (isBlocked) {
+        const blockedCount = (this.blockageFrameCount.get(pairIdx) || 0) + 1;
+        this.blockageFrameCount.set(pairIdx, blockedCount);
+        
+        // If blocked for too many frames, freeze it
+        if (blockedCount >= maxBlockedFrames) {
+          this.freezeSeamPair(pairIdx, positions, first, second, vertexCount);
+        }
+      } else {
+        // Reset blockage counter if seam is no longer blocked
+        this.blockageFrameCount.set(pairIdx, 0);
+      }
+    }
+  }
+
+  /**
+   * Freeze a seam pair at current vertex positions
+   */
+  freezeSeamPair(pairIdx, positions, vertexA, vertexB, vertexCount) {
+    if (vertexA < 0 || vertexB < 0 || vertexA >= vertexCount || vertexB >= vertexCount) {
+      return;
+    }
+    
+    this.frozenPairs.add(pairIdx);
+    
+    const ai = vertexA * 3;
+    const bi = vertexB * 3;
+    this.frozenPositions.set(vertexA, new Float32Array([
+      positions[ai], positions[ai + 1], positions[ai + 2]
+    ]));
+    this.frozenPositions.set(vertexB, new Float32Array([
+      positions[bi], positions[bi + 1], positions[bi + 2]
+    ]));
+    
+    console.log(`[SEAM FROZEN] Pair ${pairIdx} (v${vertexA}-v${vertexB}) locked due to collision.`);
+  }
+
+  /**
+   * Apply frozen seam constraints - lock vertices in place
+   */
+  applyFrozenSeamConstraints(positions, vertexCount) {
+    for (const [vertex, frozenPos] of this.frozenPositions.entries()) {
+      if (vertex < 0 || vertex >= vertexCount) continue;
+      const idx = vertex * 3;
+      positions[idx] = frozenPos[0];
+      positions[idx + 1] = frozenPos[1];
+      positions[idx + 2] = frozenPos[2];
+    }
+  }
+
+  /**
+   * Unlock seams when garment is dragged significantly
+   * Returns true if any seams were unlocked
+   */
+  unlockSeamsOnGarmentDrag(translationDelta) {
+    const DRAG_THRESHOLD = 0.05; // 5cm drag threshold
+    
+    if (translationDelta > DRAG_THRESHOLD && this.frozenPairs.size > 0) {
+      const unlockedCount = this.frozenPairs.size;
+      this.frozenPairs.clear();
+      this.frozenPositions.clear();
+      this.blockageFrameCount.clear();
+      console.log(`[SEAMS UNLOCKED] ${unlockedCount} seams unlocked due to garment movement.`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Get statistics for debugging
+   */
+  getStats() {
+    const pairCount = Math.floor(this.stitchPairs.length / 2);
+    const blockedCount = Array.from(this.blockageFrameCount.values()).filter(c => c > 0).length;
+    
+    return {
+      totalPairs: pairCount,
+      frozenPairs: this.frozenPairs.size,
+      blockedPairs: blockedCount,
+      frozenVertices: this.frozenPositions.size,
+    };
+  }
+}
+
+// ============================================================================
+// GARMENT POSITION TRACKING - For seam unlock on drag
+// ============================================================================
+
+let lastGarmentWorldPos = null;
+
+function getGarmentWorldCenter() {
+  if (!generatedGarmentMesh) return null;
+  const box = new THREE_LIB.Box3().setFromObject(generatedGarmentMesh);
+  return box.getCenter(new THREE_LIB.Vector3());
+}
+
+function updateGarmentDragTracking() {
+  const currentPos = getGarmentWorldCenter();
+  
+  if (!currentPos) {
+    lastGarmentWorldPos = null;
+    return;
+  }
+
+  if (lastGarmentWorldPos) {
+    const delta = currentPos.distanceTo(lastGarmentWorldPos);
+    
+    // Try to unlock seams if garment was dragged
+    if (garmentSimulationState?.stitchState) {
+      garmentSimulationState.stitchState.unlockSeamsOnGarmentDrag(delta);
+    }
+  }
+  
+  lastGarmentWorldPos = currentPos.clone();
+}
+
 function computeBoundsExcludingRoot(root, excludeRoot, outBox, localSpaceRoot = null) {
   if (!THREE_LIB || !outBox) return null;
   outBox.makeEmpty();
@@ -829,6 +1062,7 @@ function initModelViewer() {
   });
 
   window.addEventListener('pointerup', () => {
+    updateGarmentDragTracking();
     if (!isDraggingPreviewGarment) {
       return;
     }
@@ -1450,6 +1684,10 @@ function startGarmentSimulation(modelPayload) {
       basePositions[vertex * 3 + 2] = positions[vertex * 3 + 2];
     }
   }
+
+    // Initialize stitch constraint state (for seam freezing)
+  const stitchState = new StitchConstraintState(stitchPairs, restLengths);
+
   garmentSimulationState = {
     simulationMesh,
     seamMaterial,
@@ -1484,6 +1722,13 @@ function startGarmentSimulation(modelPayload) {
     stitchAccumWeight: new Float32Array(vertexCount),
     stitchTouchedVertices: new Int32Array(vertexCount),
     seamStretchVisual: 0,
+    // NEW: Stitch freezing system
+    stitchState,
+    fabricProps: getFabricProperties(garmentType),
+    collisionInfo: {
+      blockedSeams: new Set(),
+      blockedFrameCount: new Map(),
+    },
   };
 
   garmentSimulationLastTimestamp = 0;
@@ -2275,6 +2520,186 @@ function applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, 
   return contacts;
 }
 
+/**
+ * Solve distance constraints while respecting fabric stretch limits
+ */
+function solveDistancePairsWithFabricLimits(
+  pairs,
+  pairRestLengths,
+  stiffness,
+  positions,
+  pinnedFlags,
+  vertexCount,
+  fabricProps,
+  seamVertexFlags,
+  isTopGarment,
+  pairOffset = 0
+) {
+  const pairCount = Math.floor(pairs.length / 2);
+  if (pairCount <= 0) return;
+  
+  const normalizedOffset = ((pairOffset % pairCount) + pairCount) % pairCount;
+
+  for (let pairOrder = 0; pairOrder < pairCount; pairOrder += 1) {
+    const pair = ((pairOrder + normalizedOffset) % pairCount) * 2;
+    const first = Number(pairs[pair]);
+    const second = Number(pairs[pair + 1]);
+    const restLength = pairRestLengths[pair / 2] ?? 0;
+    if (restLength < 1e-6) continue;
+    if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+
+    const firstIndex = first * 3;
+    const secondIndex = second * 3;
+
+    const dx = positions[firstIndex] - positions[secondIndex];
+    const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
+    const dz = positions[firstIndex + 2] - positions[secondIndex + 2];
+    const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (currentLength < 1e-6) continue;
+
+    const stretchRatio = currentLength / restLength;
+    const isSeamEdge = seamVertexFlags[first] || seamVertexFlags[second];
+    
+    // Apply fabric-specific limits
+    let targetLength;
+    if (isSeamEdge) {
+      // Seams are more restrictive - can't stretch as much
+      const maxSeamStretch = restLength * fabricProps.stitchStretchLimit;
+      targetLength = Math.min(currentLength, maxSeamStretch);
+    } else {
+      // Regular edges respect full fabric stretch/compression limits
+      const maxStretch = restLength * fabricProps.maxStretchRatio;
+      const minStretch = restLength * fabricProps.minStretchRatio;
+      targetLength = Math.max(minStretch, Math.min(currentLength, maxStretch));
+    }
+
+    // Use fabric-appropriate stiffness (high stiffness = resists change more)
+    const edgeStiffness = isSeamEdge 
+      ? stiffness * fabricProps.stretchStiffness
+      : stiffness * (stretchRatio > 1 ? fabricProps.stretchStiffness : fabricProps.compressionStiffness);
+
+    const correction = ((currentLength - targetLength) / currentLength) * edgeStiffness;
+    const correctionX = dx * correction;
+    const correctionY = dy * correction;
+    const correctionZ = dz * correction;
+
+    const firstMovable = pinnedFlags[first] ? 0 : 1;
+    const secondMovable = pinnedFlags[second] ? 0 : 1;
+    const movableSum = firstMovable + secondMovable;
+    if (movableSum <= 0) continue;
+
+    const firstShare = firstMovable / movableSum;
+    const secondShare = secondMovable / movableSum;
+
+    if (firstMovable) {
+      positions[firstIndex] -= correctionX * firstShare;
+      positions[firstIndex + 1] -= correctionY * firstShare;
+      positions[firstIndex + 2] -= correctionZ * firstShare;
+    }
+    if (secondMovable) {
+      positions[secondIndex] += correctionX * secondShare;
+      positions[secondIndex + 1] += correctionY * secondShare;
+      positions[secondIndex + 2] += correctionZ * secondShare;
+    }
+  }
+}
+
+/**
+ * Solve stitch pairs while being blocked by body collision
+ * Reduces Z-pull force when seam vertices are near the body
+ */
+function solveStitchPairsAroundBodyWithFabricLimits(
+  stitchPairs,
+  restLengths,
+  positions,
+  pinnedFlags,
+  vertexCount,
+  bodyCloud,
+  fabricProps,
+  isLowerBodyGarment,
+  collisionInfo,
+  stiffness = 0.65,
+  pairOffset = 0
+) {
+  const pairCount = Math.floor(stitchPairs.length / 2);
+  if (pairCount <= 0) return;
+
+  const normalizedOffset = ((pairOffset % pairCount) + pairCount) % pairCount;
+
+  for (let pairOrder = 0; pairOrder < pairCount; pairOrder += 1) {
+    const pair = ((pairOrder + normalizedOffset) % pairCount) * 2;
+    const first = Number(stitchPairs[pair]);
+    const second = Number(stitchPairs[pair + 1]);
+    const restLength = restLengths[pair / 2] ?? 0;
+    if (restLength < 1e-6) continue;
+    if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
+
+    const firstIndex = first * 3;
+    const secondIndex = second * 3;
+
+    const dx = positions[firstIndex] - positions[secondIndex];
+    const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
+    const dz = positions[firstIndex + 2] - positions[secondIndex + 2];
+    const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (currentLength < 1e-6) continue;
+
+    // Check if this seam is blocked by body collision
+    const isBlocked = isVertexNearBody(
+      positions[firstIndex], positions[firstIndex + 1], positions[firstIndex + 2],
+      bodyCloud
+    ) || isVertexNearBody(
+      positions[secondIndex], positions[secondIndex + 1], positions[secondIndex + 2],
+      bodyCloud
+    );
+
+    if (isBlocked) {
+      collisionInfo.blockedSeams.add(pairOrder);
+    }
+
+    const zWeightNearCollision = isLowerBodyGarment ? 0.22 : 0.15;
+    const zWeightFree = 1.0;
+    const zWeight = isBlocked ? zWeightNearCollision : zWeightFree;
+
+    if (currentLength <= restLength) continue; // Only pull to close, don't compress seams
+
+    const correction = ((currentLength - restLength) / currentLength) * stiffness;
+    const correctionX = dx * correction;
+    const correctionY = dy * correction;
+    const seamZWeight = isLowerBodyGarment ? 0.45 : 1.0;
+    const correctionZ = dz * correction * seamZWeight * zWeight;
+
+    const firstMovable = pinnedFlags[first] ? 0 : 1;
+    const secondMovable = pinnedFlags[second] ? 0 : 1;
+    const movableSum = firstMovable + secondMovable;
+    if (movableSum <= 0) continue;
+
+    const firstShare = firstMovable / movableSum;
+    const secondShare = secondMovable / movableSum;
+
+    if (firstMovable) {
+      positions[firstIndex] -= correctionX * firstShare;
+      positions[firstIndex + 1] -= correctionY * firstShare;
+      positions[firstIndex + 2] -= correctionZ * firstShare;
+    }
+    if (secondMovable) {
+      positions[secondIndex] += correctionX * secondShare;
+      positions[secondIndex + 1] += correctionY * secondShare;
+      positions[secondIndex + 2] += correctionZ * secondShare;
+    }
+  }
+}
+
+/**
+ * Check if a vertex is very close to the body (within collision zone)
+ */
+function isVertexNearBody(x, y, z, bodyCloud) {
+  if (!bodyCloud) return false;
+  const margin = 0.015; // 1.5cm margin
+  return x >= bodyCloud.mnX - margin && x <= bodyCloud.mxX + margin &&
+         y >= bodyCloud.mnY - margin && y <= bodyCloud.mxY + margin &&
+         z >= bodyCloud.mnZ - margin && z <= bodyCloud.mxZ + margin;
+}
+
 function stepGarmentSimulation(deltaSeconds) {
   if (!THREE_LIB || !garmentSimulationState || !generatedGarmentMesh || !currentModel) {
     garmentSimulationState = null;
@@ -2843,14 +3268,72 @@ function stepGarmentSimulation(deltaSeconds) {
       applyLowerBodyLegCapsuleCollision(positions, pinnedFlags, vertexCount, bodyCloud, garmentType, surfaceSides);
     }
 
+        // ========== STRETCH ITERATIONS WITH FABRIC LIMITS ==========
     for (let iteration = 0; iteration < stretchIterations; iteration += 1) {
-      solveDistancePairs(structuralPairs, structuralRestLengths, 0.72);
+      solveDistancePairsWithFabricLimits(
+        structuralPairs,
+        structuralRestLengths,
+        0.72, // stiffness
+        positions,
+        pinnedFlags,
+        vertexCount,
+        state.fabricProps,
+        seamVertexFlags,
+        isTopGarment,
+        iteration
+      );
     }
     for (let iteration = 0; iteration < bendIterations; iteration += 1) {
-      solveDistancePairs(bendPairs, bendRestLengths, 0.32);
+      solveDistancePairsWithFabricLimits(
+        bendPairs,
+        bendRestLengths,
+        0.32, // stiffness
+        positions,
+        pinnedFlags,
+        vertexCount,
+        state.fabricProps,
+        seamVertexFlags,
+        isTopGarment,
+        iteration
+      );
     }
+        // ========== STITCH ITERATIONS WITH FREEZING & FABRIC LIMITS ==========
     for (let iteration = 0; iteration < stitchIterations * 2; iteration += 1) {
-      solveStitchPairsGlobal(1.0, currentStitchPairPhase + iteration);
+      // Check for seams that should be frozen due to prolonged collision blocking
+      if (state.stitchState && state.collisionInfo) {
+        state.stitchState.updateBlockageAndFreeze(
+          positions,
+          state.collisionInfo,
+          vertexCount,
+          18 // Max frames before freezing
+        );
+      }
+
+      // Apply any frozen seam constraints before solving
+      if (state.stitchState) {
+        state.stitchState.applyFrozenSeamConstraints(positions, vertexCount);
+      }
+
+      // Solve stitches with collision awareness and fabric limits
+      solveStitchPairsAroundBodyWithFabricLimits(
+        stitchPairs,
+        restLengths,
+        positions,
+        pinnedFlags,
+        vertexCount,
+        bodyCloud,
+        state.fabricProps,
+        isLowerBodyGarment,
+        state.collisionInfo,
+        1.0, // stiffness
+        currentStitchPairPhase + iteration
+      );
+
+      // Clear blocked seams set for next iteration
+      if (state.collisionInfo) {
+        state.collisionInfo.blockedSeams.clear();
+      }
+
       // For top garments, interleave body collision every 8 stitch iterations so the stitch
       // can dominate and pull seams together unless truly blocked by the body.
       if (isTopGarment && bodyCloud && iteration % 8 === 7) {
@@ -3008,7 +3491,22 @@ function stepGarmentSimulation(deltaSeconds) {
     if (seamMaterial.color && typeof seamMaterial.color.setRGB === 'function') {
       seamMaterial.color.setRGB(0.56 + smooth * 0.36, 0.56 - smooth * 0.2, 0.6 - smooth * 0.36);
     }
+    }
+
+  // ========== SEAM FREEZING STATE LOGGING ==========
+  // Log frozen seam statistics every 60 frames
+  if (state.stitchState) {
+    if (state.frame % 60 === 0) {
+      const stitchStats = state.stitchState.getStats();
+      const fabricInfo = `${state.fabricProps?.type || 'unknown'} (max ${(state.fabricProps?.maxStretchRatio * 100 - 100).toFixed(0)}% stretch)`;
+      updateDebugPanel('[SEAMS] Stitch freezing state', {
+        ...stitchStats,
+        fabric: fabricInfo,
+        frame: state.frame,
+      });
+    }
   }
+
   state.frame += 1;
   const normalRecomputeInterval = isInteractiveSolve ? 6 : (largeMesh ? 4 : 3);
   if (state.frame % normalRecomputeInterval === 0) {
