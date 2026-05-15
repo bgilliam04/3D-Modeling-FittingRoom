@@ -1500,7 +1500,6 @@ function startGarmentSimulation(modelPayload) {
     stitchAccumWeight: new Float32Array(vertexCount),
     stitchTouchedVertices: new Int32Array(vertexCount),
     seamBarrierLockedPairs: new Uint8Array(Math.floor(stitchPairs.length / 2)),
-    seamBarrierBlockCounts: new Uint16Array(Math.floor(stitchPairs.length / 2)),
     seamStretchVisual: 0,
   };
 
@@ -2395,9 +2394,6 @@ function updateSeamConstraints(deltaTime, bodyMesh) {
 function recalculateSeamFeasibility() {
   if (garmentSimulationState?.seamBarrierLockedPairs instanceof Uint8Array) {
     garmentSimulationState.seamBarrierLockedPairs.fill(0);
-    if (garmentSimulationState.seamBarrierBlockCounts instanceof Uint16Array) {
-      garmentSimulationState.seamBarrierBlockCounts.fill(0);
-    }
     needsSeamRecalculation = false;
     return;
   }
@@ -2485,15 +2481,11 @@ function stepGarmentSimulation(deltaSeconds) {
     stitchAccumWeight,
     stitchTouchedVertices,
     seamBarrierLockedPairs,
-    seamBarrierBlockCounts,
     maxPinnedY,
   } = state;
 
   if (needsSeamRecalculation && seamBarrierLockedPairs instanceof Uint8Array) {
     seamBarrierLockedPairs.fill(0);
-    if (seamBarrierBlockCounts instanceof Uint16Array) {
-      seamBarrierBlockCounts.fill(0);
-    }
     needsSeamRecalculation = false;
   }
 
@@ -2651,7 +2643,6 @@ function stepGarmentSimulation(deltaSeconds) {
   const seamSegB = new THREE_LIB.Vector3();
   const seamSegDir = new THREE_LIB.Vector3();
   const SEAM_SEGMENT_BODY_PADDING = 0.02;
-  const SEAM_BLOCK_BEFORE_LOCK = 240;
 
   const lockSeamPair = (pairIndex, firstIndex, secondIndex) => {
     if (seamBarrierLockedPairs instanceof Uint8Array && pairIndex >= 0 && pairIndex < seamBarrierLockedPairs.length) {
@@ -2731,65 +2722,6 @@ function stepGarmentSimulation(deltaSeconds) {
     return intersections.length > 0;
   };
 
-  const routeSeamPairAroundBody = (firstIndex, secondIndex) => {
-    if (firstIndex < 0 || secondIndex < 0) return;
-
-    const centerX = bodyCloud
-      ? (bodyCloud.mnX + bodyCloud.mxX) * 0.5
-      : (simulationModelBoundsBox.min.x + simulationModelBoundsBox.max.x) * 0.5;
-    const centerZ = bodyCloud
-      ? (bodyCloud.mnZ + bodyCloud.mxZ) * 0.5
-      : (simulationModelBoundsBox.min.z + simulationModelBoundsBox.max.z) * 0.5;
-    const halfX = bodyCloud
-      ? (bodyCloud.mxX - bodyCloud.mnX) * 0.5
-      : (simulationModelBoundsBox.max.x - simulationModelBoundsBox.min.x) * 0.5;
-
-    const midX = (positions[firstIndex] + positions[secondIndex]) * 0.5;
-    const midZ = (positions[firstIndex + 2] + positions[secondIndex + 2]) * 0.5;
-    let sideSign = midX >= centerX ? 1 : -1;
-    if (Math.abs(midX - centerX) < 0.004) {
-      sideSign = (positions[firstIndex] - positions[secondIndex]) >= 0 ? 1 : -1;
-    }
-
-    const sideTargetX = centerX + sideSign * (halfX + 0.028);
-    const sideBlend = 0.2;
-    const zBlend = 0.08;
-    const firstVertex = Math.floor(firstIndex / 3);
-    const secondVertex = Math.floor(secondIndex / 3);
-
-    if (!pinnedFlags[firstVertex]) {
-      positions[firstIndex] += (sideTargetX - positions[firstIndex]) * sideBlend;
-      positions[firstIndex + 2] += (midZ - positions[firstIndex + 2]) * zBlend;
-      velocities[firstIndex + 2] *= 0.55;
-    }
-    if (!pinnedFlags[secondVertex]) {
-      positions[secondIndex] += (sideTargetX - positions[secondIndex]) * sideBlend;
-      positions[secondIndex + 2] += (midZ - positions[secondIndex + 2]) * zBlend;
-      velocities[secondIndex + 2] *= 0.55;
-    }
-
-    const awayZ = Math.sign(midZ - centerZ) || 1;
-    const nudgeZ = 0.0035 * awayZ;
-    if (!pinnedFlags[firstVertex]) positions[firstIndex + 2] += nudgeZ;
-    if (!pinnedFlags[secondVertex]) positions[secondIndex + 2] += nudgeZ;
-  };
-
-  const handleBlockedSeamPair = (pairIndex, firstIndex, secondIndex) => {
-    if (!(seamBarrierBlockCounts instanceof Uint16Array)) {
-      lockSeamPair(pairIndex, firstIndex, secondIndex);
-      return;
-    }
-
-    const attempts = seamBarrierBlockCounts[pairIndex] || 0;
-    if (attempts < SEAM_BLOCK_BEFORE_LOCK) {
-      seamBarrierBlockCounts[pairIndex] = attempts + 1;
-      routeSeamPairAroundBody(firstIndex, secondIndex);
-      return;
-    }
-
-    lockSeamPair(pairIndex, firstIndex, secondIndex);
-  };
-
   const solveDistancePairs = (pairs, pairRestLengths, stiffness, pairOffset = 0) => {
     const pairCount = Math.floor(pairs.length / 2);
     if (pairCount <= 0) return;
@@ -2851,22 +2783,18 @@ function stepGarmentSimulation(deltaSeconds) {
 
     for (let pairOrder = 0; pairOrder < pairCount; pairOrder += 1) {
       const pair = ((pairOrder + normalizedOffset) % pairCount) * 2;
-      const pairIndex = pair / 2;
       const first = Number(stitchPairs[pair]);
       const second = Number(stitchPairs[pair + 1]);
-      const restLength = restLengths[pairIndex] ?? 0;
-      if (seamBarrierLockedPairs?.[pairIndex]) continue;
+      const restLength = restLengths[pair / 2] ?? 0;
+      if (seamBarrierLockedPairs?.[pair / 2]) continue;
       if (restLength < 0) continue;
       if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
 
       const firstIndex = first * 3;
       const secondIndex = second * 3;
       if (seamSegmentCrossesBody(firstIndex, secondIndex)) {
-        handleBlockedSeamPair(pairIndex, firstIndex, secondIndex);
+        lockSeamPair(pair / 2, firstIndex, secondIndex);
         continue;
-      }
-      if (seamBarrierBlockCounts instanceof Uint16Array && seamBarrierBlockCounts[pairIndex] > 0) {
-        seamBarrierBlockCounts[pairIndex] = 0;
       }
 
       const dx = positions[firstIndex] - positions[secondIndex];
@@ -2947,22 +2875,18 @@ function stepGarmentSimulation(deltaSeconds) {
 
     for (let pairOrder = 0; pairOrder < pairCount; pairOrder += 1) {
       const pair = ((pairOrder + normalizedOffset) % pairCount) * 2;
-      const pairIndex = pair / 2;
       const first = Number(stitchPairs[pair]);
       const second = Number(stitchPairs[pair + 1]);
-      const restLength = restLengths[pairIndex] ?? 0;
-      if (seamBarrierLockedPairs?.[pairIndex]) continue;
+      const restLength = restLengths[pair / 2] ?? 0;
+      if (seamBarrierLockedPairs?.[pair / 2]) continue;
       if (restLength < 0) continue;
       if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
 
       const firstIndex = first * 3;
       const secondIndex = second * 3;
       if (seamSegmentCrossesBody(firstIndex, secondIndex)) {
-        handleBlockedSeamPair(pairIndex, firstIndex, secondIndex);
+        lockSeamPair(pair / 2, firstIndex, secondIndex);
         continue;
-      }
-      if (seamBarrierBlockCounts instanceof Uint16Array && seamBarrierBlockCounts[pairIndex] > 0) {
-        seamBarrierBlockCounts[pairIndex] = 0;
       }
 
       const dx = positions[firstIndex] - positions[secondIndex];
@@ -2986,8 +2910,8 @@ function stepGarmentSimulation(deltaSeconds) {
       const currentLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (currentLength < 1e-6) continue;
       if (currentLength <= restLength) continue;
-      if (blockedByCollision && currentLength > restLength + 0.006) {
-        handleBlockedSeamPair(pairIndex, firstIndex, secondIndex);
+      if (blockedByCollision && currentLength > restLength + 0.006 && seamBarrierLockedPairs instanceof Uint8Array) {
+        lockSeamPair(pair / 2, firstIndex, secondIndex);
         continue;
       }
 
@@ -3134,22 +3058,18 @@ function stepGarmentSimulation(deltaSeconds) {
     const seamSpringDamping = 1.2;
     for (let pairOrder = 0; pairOrder < stitchPairCount; pairOrder += 1) {
       const pair = ((pairOrder + currentStitchPairPhase) % stitchPairCount) * 2;
-      const pairIndex = pair / 2;
       const first = Number(stitchPairs[pair]);
       const second = Number(stitchPairs[pair + 1]);
-      const restLength = restLengths[pairIndex] || 0;
-      if (seamBarrierLockedPairs?.[pairIndex]) continue;
+      const restLength = restLengths[pair / 2] || 0;
+      if (seamBarrierLockedPairs?.[pair / 2]) continue;
       if (restLength < 0) continue;
       if (first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
 
       const firstIndex = first * 3;
       const secondIndex = second * 3;
       if (seamSegmentCrossesBody(firstIndex, secondIndex)) {
-        handleBlockedSeamPair(pairIndex, firstIndex, secondIndex);
+        lockSeamPair(pair / 2, firstIndex, secondIndex);
         continue;
-      }
-      if (seamBarrierBlockCounts instanceof Uint16Array && seamBarrierBlockCounts[pairIndex] > 0) {
-        seamBarrierBlockCounts[pairIndex] = 0;
       }
       const dx = positions[firstIndex] - positions[secondIndex];
       const dy = positions[firstIndex + 1] - positions[secondIndex + 1];
@@ -3295,19 +3215,15 @@ function stepGarmentSimulation(deltaSeconds) {
     // possible, interleaved with collision so they stop AT the body surface and stay there.
     for (let iteration = 0; iteration < 6; iteration += 1) {
       for (let pair = 0; pair < stitchPairs.length - 1; pair += 2) {
-        const pairIndex = pair / 2;
-        if (seamBarrierLockedPairs?.[pairIndex]) continue;
+        if (seamBarrierLockedPairs?.[pair / 2]) continue;
         const first = Number(stitchPairs[pair]);
         const second = Number(stitchPairs[pair + 1]);
         if (!Number.isInteger(first) || !Number.isInteger(second) || first < 0 || second < 0 || first >= vertexCount || second >= vertexCount) continue;
         if (pinnedFlags[first] && pinnedFlags[second]) continue;
         const fi = first * 3, si = second * 3;
         if (seamSegmentCrossesBody(fi, si)) {
-          handleBlockedSeamPair(pairIndex, fi, si);
+          lockSeamPair(pair / 2, fi, si);
           continue;
-        }
-        if (seamBarrierBlockCounts instanceof Uint16Array && seamBarrierBlockCounts[pairIndex] > 0) {
-          seamBarrierBlockCounts[pairIndex] = 0;
         }
         const midX = (positions[fi]     + positions[si])     * 0.5;
         const midY = (positions[fi + 1] + positions[si + 1]) * 0.5;
