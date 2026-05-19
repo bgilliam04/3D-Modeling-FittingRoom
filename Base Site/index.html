@@ -70,94 +70,18 @@
       </div>
 
       <div class="hero-showcase">
-        <div class="preview-card">
-          <div class="preview-header">
-            <div>
-              <span class="preview-kicker">Live fit scan</span>
-              <h2>Body-aware preview</h2>
-            </div>
-            <span class="status-pill">Preview</span>
-          </div>
-
-          <div class="preview-frame">
-            <div id="modelContainer" class="visual-placeholder">
-              <div id="previewHint" class="preview-hint">
-                <div>
-                 
-                </div>
-              </div>
-
-              <img id="clothingOverlay" class="clothing-overlay" alt="Clothing overlay" hidden />
-            </div>
-          </div>
-
-          <div class="size-guide-panel">
-            <div class="panel-heading">
-              <h4>Detected sizes</h4>
-              <span>Choose a size after analysis</span>
-            </div>
-            <div id="sizeButtons" class="size-buttons"></div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="audience-section" aria-label="Fit priorities">
-      <div class="section-header clean-header">
-        <p class="eyebrow">Built for real proportions</p>
-        <h2>Better fit signals before you buy.</h2>
-      </div>
-
-      <div class="audience-grid">
-        <article class="audience-card image-card main-card">
-          <div>
-            <p class="eyebrow">Length-aware</p>
-            <h3>No more accidental crop tops.</h3>
-            <p>Preview sleeve length, inseams, torso placement, and where hems actually land.</p>
-          </div>
-        </article>
-
-        <article class="audience-card soft-card">
-          <p class="eyebrow">Proportion-aware</p>
-          <h3>See the silhouette sooner.</h3>
-          <p>Check where shoulders, waists, and seams fall before ordering.</p>
-        </article>
-
-        <article class="audience-card cream-card">
-          <p class="eyebrow">Shape-aware</p>
-          <h3>Compare size without guessing.</h3>
-          <p>Use body scan data and size-guide uploads to test fit options.</p>
-        </article>
-
-        <article class="audience-card closet-card">
-          <span class="closet-label">Digital closet</span>
-          <h3>Upload your real wardrobe.</h3>
-          <p>Store pieces from your closet and reuse them in try-on sessions.</p>
-          <a class="btn secondary" href="#closet">Build closet</a>
-        </article>
-      </div>
-    </section>
-
-    <section class="studio-section" id="studio">
-      <div class="section-header split-header">
-        <p class="eyebrow">Try-on studio</p>
-        <h2>Build the fit session.</h2>
-        <p>Three uploads, one preview workspace. Clean, direct, and built around proportions instead of generic sizing guesses.</p>
-      </div>
-
-      <div class="studio-shell">
         <div class="upload-grid">
           <article class="upload-card">
             <div class="upload-card-header">
-              <span>Scan</span>
-              <h3>Body scan</h3>
+              <span>You</span>
+              <h3>Body Info</h3>
             </div>
 
             <label class="upload-label">
               Upload 3D scan
               <input type="file" id="scanUpload" accept=".glb,.gltf" />
               <span class="upload-help">Allowed file types: .glb and .gltf.</span>
-            </label>
+            </label> -
 
             <label class="upload-label">
               Model height
@@ -174,7 +98,7 @@
               </div>
               <span class="upload-help">Used to convert size-guide inches into real 3D garment scale.</span>
             </label>
-          </article>
+          </article> 
 
           <article class="upload-card featured-upload">
             <div class="upload-card-header">
@@ -229,19 +153,89 @@
       </div>
     </section>
 
+    <section class="audience-section" aria-label="Fit priorities">
+      <div class="section-header clean-header">
+        <p class="eyebrow">Built for real proportions</p>
+        <h2>Better fit signals before you buy.</h2>
+      </div>
+
+      <div class="audience-grid">
+        <article class="audience-card image-card main-card">
+          <div>
+            <p class="eyebrow">Length-aware</p>
+            <h3>No more accidental crop tops.</h3>
+            <p>Preview sleeve length, inseams, torso placement, and where hems actually land.</p>
+          </div>
+        </article>
+
+        <article class="audience-card soft-card">
+          <p class="eyebrow">Proportion-aware</p>
+          <h3>See the silhouette sooner.</h3>
+          <p>Check where shoulders, waists, and seams fall before ordering.</p>
+        </article>
+
+        <article class="audience-card cream-card">
+          <p class="eyebrow">Shape-aware</p>
+          <h3>Compare size without guessing.</h3>
+          <p>Use body scan data and size-guide uploads to test fit options.</p>
+        </article>
+
+       <!-- <article class="audience-card closet-card">
+          <span class="closet-label">Digital closet</span>
+          <h3>Upload your real wardrobe.</h3>
+          <p>Store pieces from your closet and reuse them in try-on sessions.</p>
+          <a class="btn secondary" href="#closet">Build closet</a> 
+        </article> -->
+      </div>
+    </section>
+  <!--
+    <section class="studio-section" id="studio">
+      <div class="section-header split-header">
+         <div class="preview-card">
+          <div class="preview-header">
+            <div>
+              <span class="preview-kicker">Live fit scan</span>
+              <h2>Body-aware preview</h2>
+            </div>
+            <span class="status-pill">Preview</span>
+          </div>
+
+          <div class="preview-frame">
+            <div id="modelContainer" class="visual-placeholder">
+              <div id="previewHint" class="preview-hint">
+                <div>
+                 
+                </div>
+              </div>
+
+              <img id="clothingOverlay" class="clothing-overlay" alt="Clothing overlay" hidden />
+            </div>
+          </div>
+
+          <div class="size-guide-panel">
+            <div class="panel-heading">
+              <h4>Detected sizes</h4>
+              <span>Choose a size after analysis</span>
+            </div>
+            <div id="sizeButtons" class="size-buttons"></div>
+          </div>
+        </div>
+      </div>
+    </section> -->
+
     <section class="closet-section" id="closet">
       <div class="section-header split-header">
-        <p class="eyebrow">Digital closet</p>
-        <h2>Store your clothes.</h2>
-        <p>Upload garment photos from your real closet and keep them ready for future try-on sessions.</p>
+        <p class="eyebrow">Library</p>
+        <h2>Size Guide Library</h2>
+        <p>List of Size Guides from select stores focused on body size outliers</p>
       </div>
 
       <div class="closet-shell">
         <div class="closet-upload-card">
           <div>
-            <span class="closet-label">closet upload</span>
-            <h3>Add clothing from your closet</h3>
-            <p>Upload photos of shirts, skirts, pants, jackets, or dresses. They’ll appear in your closet grid.</p>
+            <span class="closet-label">Size guide upload</span>
+            <h3>Add size guides to your library</h3>
+            <p>Upload new guides.</p>
           </div>
 
           <label class="closet-upload-label">
@@ -252,8 +246,8 @@
 
         <div class="closet-grid" id="closetGrid">
           <article class="closet-empty">
-            <span>No closet items yet</span>
-            <p>Upload clothing photos to start building your digital wardrobe.</p>
+            <span>No size guides available</span>
+            <p>Upload size guide images to start building your digital library.</p>
           </article>
         </div>
       </div>
@@ -261,7 +255,7 @@
 
     <section class="process-section" id="process">
       <div class="section-header clean-header">
-        <p class="eyebrow">How it works</p>
+        <p class="eyebrow">Coming Soon in Version Two</p>
         <h2>From closet image to fit preview.</h2>
       </div>
 
@@ -271,12 +265,14 @@
           <h3>Upload your scan</h3>
           <p>Add a GLB or GLTF body model so the fitting room has a 3D form to work with.</p>
         </article>
-        <article class="upload-card">
-          <label class="upload-label">
-            Clothing Image
-            <input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" />
-            <span class="upload-help">Allowed file types: .png, .jpg, .jpeg.</span>
-          </label>
+        <article class="process-card">
+      <!-- <article class="upload-card">
+          <label class="upload-label"> -->
+            <span>Garment</span> 
+           <h3>Insert Your Image</h3> 
+            <!--<input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" /> -->
+            <p>Add the image of the clothing you'd like to see modeled on your body.</p>
+       <!--   </label>
           <label class="upload-label" style="margin-top: 1rem;">
             Garment Type
             <select id="garmentTypeSelect">
@@ -293,7 +289,7 @@
               <option value="romper">Romper / Jumpsuit</option>
             </select>
             <span class="upload-help">Pick the garment type to guide cutout detection.</span>
-          </label>
+          </label> -->
         </article>
 
         <article class="process-card">
@@ -304,7 +300,7 @@
       </div>
     </section>
 
-    <section class="collection" id="collection">
+  <!--  <section class="collection" id="collection">
       <div class="section-header split-header">
         <p class="eyebrow">Test collection</p>
         <h2>Starter garments.</h2>
@@ -322,7 +318,7 @@
           </div>
         </article>
       </div>
-    </section>
+    </section> -->
 
     <section class="lead-form" id="contact">
       <div class="section-header clean-header">
@@ -354,7 +350,7 @@
 
     <footer class="site-footer">
       <p>2026 thatfits. Built by students for Start Up Term.</p>
-      <p>Uses the pipeline from xCloth (ISBN 9781450392037, pages 2504-2512) to generate clothing.</p>
+      <p>Built using GenAI. This should never be sold for commercial purposes (that would have problems of potential plagiarism and is just generally unethical).</p>
     </footer>
   </main>
 
