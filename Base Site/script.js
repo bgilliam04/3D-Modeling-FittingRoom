@@ -45,6 +45,9 @@ const garmentTypeSelect = document.getElementById('garmentTypeSelect');
 const sizeGuideUpload = document.getElementById('sizeGuideUpload');
 const modelHeightFeetInput = document.getElementById('modelHeightFeetInput');
 const modelHeightInchesInput = document.getElementById('modelHeightInchesInput');
+const bodyChestInput = document.getElementById('bodyChestInput');
+const bodyWaistInput = document.getElementById('bodyWaistInput');
+const bodyHipInput = document.getElementById('bodyHipInput');
 const analyzeButton = document.getElementById('analyzeButton');
 const analysisResults = document.getElementById('analysisResults');
 const analyzeStatus = document.getElementById('analyzeStatus');
@@ -54,6 +57,7 @@ const sizeButtons = document.getElementById('sizeButtons');
 const previewHint = document.getElementById('previewHint');
 const BACKEND_URL = 'http://localhost:4000';
 const THREE_LIB = window.THREE || window.three || null;
+const ENABLE_DEBUG_PANEL = new URLSearchParams(window.location.search).has('debug');
 
 if (!THREE_LIB) {
   console.error('Three.js was not found on window. Check CDN script loading order in index.html.');
@@ -474,6 +478,20 @@ function getModelHeightInches() {
   return Number.isFinite(totalInches) && totalInches > 0 ? totalInches : 68;
 }
 
+function parsePositiveNumberInput(input) {
+  const value = Number(input?.value);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function getUserBodyMeasurements() {
+  return {
+    height: modelHeightFeetInput || modelHeightInchesInput ? getModelHeightInches() : null,
+    chest: parsePositiveNumberInput(bodyChestInput),
+    waist: parsePositiveNumberInput(bodyWaistInput),
+    hip: parsePositiveNumberInput(bodyHipInput),
+  };
+}
+
 function getPixelsPerInch() {
   // Calculate pixels (3D units) per inch based on the current model's visual height
   if (!THREE_LIB || !currentModel) {
@@ -691,6 +709,7 @@ function setPreviewBackground(hasModel = false) {
 }
 
 function ensureDebugPanel() {
+  if (!ENABLE_DEBUG_PANEL) return null;
   if (debugPanel) return debugPanel;
 
   debugPanel = document.createElement('pre');
@@ -717,7 +736,13 @@ function ensureDebugPanel() {
 }
 
 function updateDebugPanel(message, details = null) {
+  if (!ENABLE_DEBUG_PANEL) {
+    console.debug(`[thatfits] ${message}`, details || '');
+    return;
+  }
+
   const panel = ensureDebugPanel();
+  if (!panel) return;
   const timestamp = new Date().toLocaleTimeString();
   let line = `[${timestamp}] ${message}`;
   if (details) {
@@ -3322,6 +3347,11 @@ function setGeneratedGarmentMesh(modelPayload) {
     initModelViewer();
   }
 
+  if (!scene) {
+    updateDebugPanel('Preview is unavailable. Cannot render garment model.');
+    return;
+  }
+
   clearGeneratedGarmentMesh();
 
   if (modelPayload.format === 'glb-base64' && modelPayload.glbDataUrl) {
@@ -3731,6 +3761,152 @@ function applySelectedClothingSize() {
   resizeClothingImage(currentClothingSizeValue);
 }
 
+function getBodyMeasurementKeyForChartLabel(label, garmentType = getSelectedGarmentType()) {
+  const normalized = String(label || '').toUpperCase();
+  const normalizedGarmentType = String(garmentType || '').toLowerCase();
+
+  if (normalized.includes('WAIST')) return 'waist';
+  if (normalized.includes('HIP') || normalized.includes('SEAT')) return 'hip';
+  if (normalized.includes('CHEST') || normalized.includes('BUST') || normalized.includes('BODY WIDTH')) return 'chest';
+
+  if (normalized.includes('WIDTH')) {
+    if (['pants', 'shorts', 'skirt'].includes(normalizedGarmentType)) return 'waist';
+    return 'chest';
+  }
+
+  if (normalized.includes('LENGTH') || normalized.includes('INSEAM') || normalized.includes('OUTSEAM')) return 'height';
+
+  return null;
+}
+
+function getTargetMeasurementForChartEntry(measurementType, chartValue, bodyMeasurements, garmentType = getSelectedGarmentType()) {
+  const key = getBodyMeasurementKeyForChartLabel(measurementType, garmentType);
+  if (!key || !Number.isFinite(Number(bodyMeasurements?.[key]))) return null;
+
+  let target = Number(bodyMeasurements[key]);
+  const label = String(measurementType || '').toUpperCase();
+  const value = Number(chartValue);
+
+  if (!Number.isFinite(target) || !Number.isFinite(value)) return null;
+
+  const looksLikeFlatWidth =
+    label.includes('WIDTH') ||
+    label.includes('HALF') ||
+    (['chest', 'waist', 'hip'].includes(key) && target >= 28 && value > 0 && value < target * 0.72);
+
+  if (looksLikeFlatWidth && key !== 'height') {
+    target /= 2;
+  }
+
+  if (key === 'height') {
+    // Length rows usually describe garment length, not wearer height. Use them only as
+    // a weak tiebreaker so width/circumference measurements drive the recommendation.
+    return target * 0.42;
+  }
+
+  return target;
+}
+
+function recommendSizeFromMeasurements(sizeMap, bodyMeasurements, garmentType = getSelectedGarmentType()) {
+  const entries = Object.entries(sizeMap || {});
+  const candidates = [];
+
+  for (const [sizeLabel, measurements] of entries) {
+    let score = 0;
+    let comparedCount = 0;
+    let underfitCount = 0;
+    const matchedMeasurements = [];
+
+    for (const measurement of measurements || []) {
+      const value = Number(measurement.value);
+      if (!Number.isFinite(value)) continue;
+
+      const target = getTargetMeasurementForChartEntry(measurement.measurementType, value, bodyMeasurements, garmentType);
+      if (!Number.isFinite(target)) continue;
+
+      const key = getBodyMeasurementKeyForChartLabel(measurement.measurementType, garmentType);
+      const isHeightLike = key === 'height';
+      const difference = value - target;
+
+      comparedCount += 1;
+      if (difference < 0) underfitCount += 1;
+
+      const weight = isHeightLike ? 0.25 : 1;
+      score += Math.abs(difference) * weight;
+      if (difference < 0 && !isHeightLike) {
+        score += Math.abs(difference) * 12 + 80;
+      }
+
+      matchedMeasurements.push({
+        label: measurement.measurementType,
+        chartValue: value,
+        target,
+        difference,
+      });
+    }
+
+    if (comparedCount > 0) {
+      candidates.push({ sizeLabel, score, comparedCount, underfitCount, matchedMeasurements });
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((first, second) => {
+    if (first.underfitCount !== second.underfitCount) return first.underfitCount - second.underfitCount;
+    if (first.score !== second.score) return first.score - second.score;
+    return first.sizeLabel.localeCompare(second.sizeLabel, undefined, { numeric: true, sensitivity: 'base' });
+  });
+
+  return candidates[0];
+}
+
+function renderRecommendedSize(recommendation, bodyMeasurements) {
+  if (!sizeButtons) return;
+
+  const existing = sizeButtons.querySelector('.size-recommendation');
+  if (existing) existing.remove();
+
+  const panel = document.createElement('div');
+  panel.className = 'size-recommendation';
+
+  const hasAnyMeasurement = ['chest', 'waist', 'hip'].some((key) => Number.isFinite(Number(bodyMeasurements?.[key])));
+  if (!hasAnyMeasurement) {
+    panel.innerHTML = `
+      <strong>Recommendation needs measurements</strong>
+      <span>Enter chest, waist, or hip measurements above to recommend a size from this guide.</span>
+    `;
+    sizeButtons.prepend(panel);
+    return;
+  }
+
+  if (!recommendation) {
+    panel.innerHTML = `
+      <strong>No matching body-measurement rows found</strong>
+      <span>This guide parsed sizes, but not chest, waist, hip, or width rows that can be compared to your inputs.</span>
+    `;
+    sizeButtons.prepend(panel);
+    return;
+  }
+
+  const comparedLabels = recommendation.matchedMeasurements
+    .slice(0, 3)
+    .map((entry) => `${entry.label}: ${entry.chartValue}"`)
+    .join(' · ');
+
+  panel.innerHTML = `
+    <strong>Recommended size: ${recommendation.sizeLabel}</strong>
+    <span>${comparedLabels || 'Based on the measurements found in the uploaded size guide.'}</span>
+  `;
+  sizeButtons.prepend(panel);
+
+  const matchingButton = [...sizeButtons.querySelectorAll('.size-button')]
+    .find((button) => normalizeSizeLabel(button.textContent) === normalizeSizeLabel(recommendation.sizeLabel));
+  if (matchingButton) {
+    matchingButton.classList.add('recommended');
+  }
+}
+
 function chooseRepresentativeMeasurement(measurements) {
   const list = Array.isArray(measurements) ? measurements.filter(Boolean) : [];
   if (list.length === 0) {
@@ -3904,7 +4080,7 @@ function renderSizeButtons(sizes) {
 
   if (normalizedMeasurements.length === 0) {
     sizeButtons.textContent = 'No sizes detected. Try uploading a clearer, high-quality screenshot of the size guide. Ensure the text is crisp and the table is well-lit.';
-    return;
+    return null;
   }
 
   // Calibrate and convert all measurements to pixel values using the model's current setup
@@ -3976,8 +4152,16 @@ function renderSizeButtons(sizes) {
     sizeButtons.appendChild(createSizeButton(size));
   });
 
+  const bodyMeasurements = getUserBodyMeasurements();
+  const recommendation = recommendSizeFromMeasurements(sizeToMeasurementsMap, bodyMeasurements, getSelectedGarmentType());
+  renderRecommendedSize(recommendation, bodyMeasurements);
+  if (recommendation) {
+    analyzeStatus.textContent = `Recommended size: ${recommendation.sizeLabel}`;
+  }
+
   // Do not auto-apply a size. Keep the generated outline-driven mesh unchanged
   // until the user explicitly chooses a size to avoid involuntary bloating.
+  return recommendation;
 }
 
 function loadScanFile(file) {
@@ -4200,6 +4384,13 @@ if (clothingOverlay) {
   });
 
   document.addEventListener('mouseup', () => {
+    if (isDraggingClothing || isResizingClothing) {
+      isDraggingClothing = false;
+      isResizingClothing = false;
+      clothingOverlay.classList.remove('dragging');
+      return;
+    }
+
     if (!isDraggingPreviewGarment) {
       return;
     }
@@ -4222,12 +4413,12 @@ if (analyzeButton) {
     const garmentType = getSelectedGarmentType();
     const analysisKey = getClothingAnalysisKey(clothingFile, garmentType);
 
-    if (!clothingFile) {
-      analyzeStatus.textContent = 'Please upload a clothing image first.';
+    if (!clothingFile && sizeGuideFiles.length === 0) {
+      analyzeStatus.textContent = 'Enter measurements, then upload a size guide to recommend a size.';
       return;
     }
 
-    analyzeStatus.textContent = 'Analyzing images...';
+    analyzeStatus.textContent = clothingFile ? 'Analyzing images...' : 'Processing size guide...';
     updateDebugPanel('Analyze started.', {
       hasClothingFile: Boolean(clothingFile),
       sizeGuideCount: sizeGuideFiles.length,
@@ -4235,40 +4426,48 @@ if (analyzeButton) {
     });
 
     try {
-      const clothingResult = await analyzeImages(clothingFile, 'clothing', garmentType);
-      cachedClothingAnalysisKey = analysisKey;
-      cachedClothingResult = clothingResult;
+      if (clothingFile) {
+        const clothingResult = await analyzeImages(clothingFile, 'clothing', garmentType);
+        cachedClothingAnalysisKey = analysisKey;
+        cachedClothingResult = clothingResult;
 
-      console.log('Clothing result:', clothingResult);
-      updateDebugPanel('Clothing API response received.', {
-        hasGarmentModel: Boolean(clothingResult.garmentModel),
-        hasProcessedImageUrl: Boolean(clothingResult.processedImageUrl),
-        modelFramework: clothingResult.garmentModel?.framework || null,
-        modelFormat: clothingResult.garmentModel?.format || null,
-        modelSource: clothingResult.modelSource || null,
-      });
+        console.log('Clothing result:', clothingResult);
+        updateDebugPanel('Clothing API response received.', {
+          hasGarmentModel: Boolean(clothingResult.garmentModel),
+          hasProcessedImageUrl: Boolean(clothingResult.processedImageUrl),
+          modelFramework: clothingResult.garmentModel?.framework || null,
+          modelFormat: clothingResult.garmentModel?.format || null,
+          modelSource: clothingResult.modelSource || null,
+        });
 
-      if (clothingResult.garmentModel) {
-        setGeneratedGarmentMesh(clothingResult.garmentModel);
-      } else if (clothingResult.processedImageUrl) {
-        clearGeneratedGarmentMesh();
-        setCutoutOverlay(clothingResult.processedImageUrl, clothingResult.cutout);
+        if (clothingResult.garmentModel) {
+          setGeneratedGarmentMesh(clothingResult.garmentModel);
+        } else if (clothingResult.processedImageUrl) {
+          clearGeneratedGarmentMesh();
+          setCutoutOverlay(clothingResult.processedImageUrl, clothingResult.cutout);
+        } else {
+          clearGeneratedGarmentMesh();
+          currentGarmentCutout = null;
+          setClothingOverlay(clothingFile);
+          updateDebugPanel('Fallback to original clothing overlay (no generated model).');
+        }
+
+        analysisResults.innerHTML = `
+          <div>
+            <h4>Clothing Image Analysis</h4>
+            <pre>${formatAnalysis('Clothing Image', clothingResult.analysis)}</pre>
+          </div>
+        `;
       } else {
         clearGeneratedGarmentMesh();
         currentGarmentCutout = null;
-        setClothingOverlay(clothingFile);
-        updateDebugPanel('Fallback to original clothing overlay (no generated model).');
+        analysisResults.innerHTML = '';
       }
 
-      analysisResults.innerHTML = `
-        <div>
-          <h4>Clothing Image Analysis</h4>
-          <pre>${formatAnalysis('Clothing Image', clothingResult.analysis)}</pre>
-        </div>
-      `;
-
       if (sizeGuideFiles.length > 0) {
-        analyzeStatus.textContent = 'Garment preview ready. Processing size guide in background...';
+        analyzeStatus.textContent = clothingFile
+          ? 'Garment preview ready. Processing size guide in background...'
+          : 'Processing size guide and recommending size...';
 
         (async () => {
           try {
@@ -4292,8 +4491,10 @@ if (analyzeButton) {
             }
 
             console.log('About to render sizes:', mergedSizes);
-            renderSizeButtons(mergedSizes);
-            analyzeStatus.textContent = 'Analysis complete.';
+            const recommendation = renderSizeButtons(mergedSizes);
+            analyzeStatus.textContent = recommendation
+              ? `Recommended size: ${recommendation.sizeLabel}`
+              : 'Analysis complete.';
           } catch (sizeGuideError) {
             if (requestId !== analyzeRequestId) return;
             analyzeStatus.textContent = `Garment preview ready. Size guide parsing failed: ${sizeGuideError.message}`;
@@ -4305,9 +4506,9 @@ if (analyzeButton) {
       } else {
         if (sizeButtons) {
           sizeButtons.innerHTML = '';
-          sizeButtons.textContent = 'Upload a size guide to generate size buttons.';
+          sizeButtons.textContent = 'Upload a size guide to recommend a size.';
         }
-        analyzeStatus.textContent = 'Garment model generated. Upload a size guide to enable sizing controls.';
+        analyzeStatus.textContent = 'Garment model generated. Upload a size guide to recommend a size.';
       }
     } catch (error) {
       analyzeStatus.textContent = error.message;

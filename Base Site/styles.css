@@ -264,6 +264,26 @@ p { color: var(--muted); line-height: 1.65; font-size: 1rem; }
   font-size: clamp(1.05rem, 1.4vw, 1.25rem);
 }
 
+.hero-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 1.35rem;
+}
+
+.hero-metrics span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid rgba(123, 37, 95, 0.16);
+  background: rgba(255, 250, 243, 0.72);
+  color: var(--purple);
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .hero-actions { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 2.2rem; }
 
 .btn {
@@ -361,7 +381,19 @@ p { color: var(--muted); line-height: 1.65; font-size: 1rem; }
 .panel-heading span { color: var(--muted); font-size: 0.85rem; line-height: 1.45; }
 .size-buttons { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.8rem; }
 .size-button { border: 1px solid var(--border); background: rgba(255, 248, 239, 0.74); color: var(--ink); padding: 0.68rem 0.95rem; cursor: pointer; font-weight: 800; }
-.size-button:hover, .size-button.active { background: rgba(123, 37, 95, 0.12); }
+.size-button:hover, .size-button.active, .size-button.recommended { background: rgba(123, 37, 95, 0.12); }
+.size-button.recommended { border-color: rgba(123, 37, 95, 0.55); box-shadow: 0 0 0 3px rgba(123, 37, 95, 0.10); }
+.size-recommendation {
+  flex: 1 0 100%;
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.85rem 1rem;
+  background: rgba(123, 37, 95, 0.10);
+  border: 1px solid rgba(123, 37, 95, 0.18);
+  color: var(--ink);
+}
+.size-recommendation strong { color: var(--espresso); line-height: 1.25; }
+.size-recommendation span { color: var(--muted); line-height: 1.45; font-size: 0.9rem; }
 
 .audience-section, .studio-section, .closet-section, .process-section, .collection, .lead-form {
   width: 100%;
@@ -414,9 +446,9 @@ p { color: var(--muted); line-height: 1.65; font-size: 1rem; }
 .image-card {
   background:
     linear-gradient(rgba(36, 23, 17, 0.16), rgba(36, 23, 17, 0.46)),
-    url("https://images.unsplash.com/photo-1503342217505-b0a15ec3261c?auto=format&fit=crop&w=1400&q=80");
+    url("images/body-positive-fit-card.jpg");
   background-size: cover;
-  background-position: center 22%;
+  background-position: center 35%;
 }
 
 .image-card h3,
@@ -433,6 +465,44 @@ p { color: var(--muted); line-height: 1.65; font-size: 1rem; }
   padding: clamp(1rem, 3vw, 2rem);
   background: rgba(255, 248, 239, 0.76);
   box-shadow: var(--shadow);
+}
+
+.studio-shell .preview-card {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.workflow-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.workflow-strip li {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 44px;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(36, 23, 17, 0.12);
+  background: rgba(255, 250, 243, 0.76);
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.workflow-strip span {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 1.6rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  background: var(--espresso);
+  color: var(--cream);
+  font-size: 0.75rem;
 }
 
 .upload-grid { display: grid; gap: 1rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -454,6 +524,12 @@ p { color: var(--muted); line-height: 1.65; font-size: 1rem; }
 .featured-upload input, .featured-upload select, .dark-card input, .dark-card select { color: var(--espresso); background: var(--cream); }
 
 .upload-card-header { display: flex; align-items: flex-start; gap: 0.85rem; }
+.upload-card h3 {
+  min-width: 0;
+  font-size: clamp(1.15rem, 1.7vw, 1.55rem);
+  line-height: 1.08;
+  overflow-wrap: anywhere;
+}
 .upload-card-header span, .process-card span {
   display: inline-grid;
   place-items: center;
@@ -477,10 +553,38 @@ p { color: var(--muted); line-height: 1.65; font-size: 1rem; }
   color: var(--ink);
   outline: none;
 }
+
+.upload-label input[type="file"] {
+  min-height: 50px;
+  padding: 0.45rem;
+  cursor: pointer;
+}
+
+.upload-label input[type="file"]::file-selector-button {
+  min-height: 38px;
+  margin-right: 0.7rem;
+  padding: 0 0.85rem;
+  border: 1px solid rgba(36, 23, 17, 0.18);
+  background: var(--espresso);
+  color: var(--cream);
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.upload-label input[type="file"]::file-selector-button:hover {
+  background: var(--purple);
+}
 .upload-label input:focus, .upload-label select:focus, .contact-form input:focus, .contact-form textarea:focus { border-color: var(--purple); box-shadow: 0 0 0 4px rgba(123, 37, 95, 0.11); }
 .upload-help { color: var(--muted); font-size: 0.84rem; font-weight: 500; line-height: 1.45; }
 .height-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.7rem; }
-.upload-actions { display: flex; flex-direction: column; align-items: center; gap: 0.8rem; margin: 1.5rem auto 0; }
+.body-measurement-grid { display: grid; gap: 0.75rem; }
+.upload-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.9rem;
+  margin: 0 0 1rem;
+}
 .form-status { min-height: 1.5rem; color: var(--purple); font-weight: 800; margin: 0; }
 .analysis-results { margin-top: 1.25rem; background: rgba(255, 248, 239, 0.76); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; color: var(--muted); overflow: auto; }
 .analysis-results h4 { color: var(--ink); margin-top: 0; }
@@ -513,6 +617,67 @@ p { color: var(--muted); line-height: 1.65; font-size: 1rem; }
 .site-footer { padding: 2.5rem clamp(1rem, 4vw, 3rem) 3rem; text-align: center; color: var(--muted); border-top: 1px solid var(--border); }
 .site-footer p { margin: 0.25rem auto; max-width: 900px; font-size: 0.92rem; }
 
+@media (max-width: 1380px) {
+  .hero {
+    grid-template-columns: minmax(0, 0.78fr) minmax(580px, 1.22fr);
+    gap: clamp(1.2rem, 3vw, 2.2rem);
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+  }
+
+  .hero h1 {
+    font-size: clamp(2.85rem, 4.45vw, 4.8rem);
+    line-height: 0.95;
+    letter-spacing: 0;
+  }
+
+  .hero .upload-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.8rem;
+    align-items: start;
+  }
+
+  .hero .workflow-strip {
+    gap: 0.55rem;
+  }
+
+  .hero .workflow-strip li {
+    min-height: 38px;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.7rem;
+  }
+
+  .hero .upload-card {
+    padding: 0.9rem;
+    gap: 0.8rem;
+  }
+
+  .hero .upload-card-header {
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .hero .upload-label input,
+  .hero .upload-label select {
+    padding: 0.72rem 0.75rem;
+  }
+
+  .hero .height-fields {
+    gap: 0.55rem;
+  }
+
+  .hero .body-measurement-grid {
+    gap: 0.55rem;
+  }
+
+  .hero .upload-help {
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  .hero .upload-actions { margin-bottom: 0.8rem; }
+}
+
 @media (max-width: 1100px) {
   .hero { grid-template-columns: 1fr; }
   .hero::before { width: 100%; opacity: 0.10; clip-path: none; }
@@ -535,14 +700,22 @@ p { color: var(--muted); line-height: 1.65; font-size: 1rem; }
   .site-header { position: sticky; left: 0; min-height: 74px; }
   .page-shell { margin-left: 0; padding-top: 0; }
   .logo { width: 48px; }
-  #themeSwitcher { max-width: 130px; }
+  #themeSwitcher {
+    max-width: 152px;
+    padding-inline: 0.7rem;
+    font-size: 0.9rem;
+  }
   .topline span:nth-child(n+2) { display: none; }
   h1 { font-size: clamp(3.1rem, 15vw, 5rem); }
   .hero { padding-inline: 1rem; }
+  .upload-actions { align-items: stretch; flex-direction: column; }
   .hero-actions { flex-direction: column; align-items: stretch; }
   .preview-card { min-height: 540px; }
   .visual-placeholder { min-height: 360px; }
   .panel-heading { display: grid; }
+  .hero .upload-grid { grid-template-columns: 1fr; }
+  .hero .workflow-strip { grid-template-columns: 1fr; }
+  .hero .upload-card { grid-column: auto; }
   .audience-grid { grid-template-columns: 1fr; }
   .main-card { grid-column: span 1; min-height: 340px; }
 }
@@ -705,9 +878,9 @@ p {
 .main-card.image-card {
   background:
     linear-gradient(rgba(47, 32, 24, 0.18), rgba(47, 32, 24, 0.52)),
-    url("https://images.unsplash.com/photo-1503342217505-b0a15ec3261c?auto=format&fit=crop&w=1400&q=80") !important;
+    url("images/body-positive-fit-card.jpg") !important;
   background-size: cover !important;
-  background-position: center 22% !important;
+  background-position: center 35% !important;
 }
 
 .main-card.image-card h3,
@@ -869,6 +1042,12 @@ textarea,
 .brand-rail,
 .site-header {
   background: rgba(255, 250, 243, 0.96) !important;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: 0 !important;
 }
 
 .featured-upload,

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=demo-20260524" />
 </head>
 
 <body class="theme-1">
@@ -48,9 +48,8 @@
 
     <a href="#home">Home</a>
     <a href="#studio">Studio</a>
-    <a href="#closet">Closet</a>
+    <a href="#closet">Size Guides</a>
     <a href="#process">How it works</a>
-    <a href="#collection">Collection</a>
     <a href="#contact">Feedback</a>
   </nav>
 
@@ -63,41 +62,55 @@
           Virtual try-on for shoppers who need better answers around length, curve, proportion, and garment placement before buying.
         </p>
 
+        <div class="hero-metrics" aria-label="Fit inputs">
+          <span>Body measurements</span>
+          <span>Brand size guide</span>
+          <span>Recommended size</span>
+        </div>
+
         <div class="hero-actions">
           <a class="btn primary" href="#studio">Start fitting</a>
-          <a class="btn secondary" href="#closet">Open closet</a>
+          <a class="btn secondary" href="#closet">Size guide library</a>
         </div>
       </div>
 
-      <div class="hero-showcase">
+      <div class="hero-showcase" id="studio">
+        <ol class="workflow-strip" aria-label="Fitting workflow">
+          <li><span>1</span> Enter measurements</li>
+          <li><span>2</span> Upload guide</li>
+          <li><span>3</span> Get recommendation</li>
+        </ol>
+
+        <div class="upload-actions">
+          <button type="button" class="btn primary" id="analyzeButton">Analyze fit</button>
+          <p class="form-status" id="analyzeStatus"></p>
+        </div>
+
         <div class="upload-grid">
           <article class="upload-card">
             <div class="upload-card-header">
               <span>You</span>
-              <h3>Body Info</h3>
+              <h3>Body measurements</h3>
             </div>
 
-            <label class="upload-label">
-              Upload 3D scan
-              <input type="file" id="scanUpload" accept=".glb,.gltf" />
-              <span class="upload-help">Allowed file types: .glb and .gltf.</span>
-            </label> -
+            <div class="body-measurement-grid" aria-label="Body measurements in inches">
+              <label class="upload-label">
+                Chest / bust
+                <input type="number" id="bodyChestInput" min="0" step="0.5" placeholder="Inches" />
+              </label>
 
-            <label class="upload-label">
-              Model height
-              <div class="height-fields">
-                <div>
-                  <input type="number" id="modelHeightFeetInput" min="3" max="8" step="1" value="5" placeholder="Feet" />
-                  <span class="upload-help">Feet</span>
-                </div>
+              <label class="upload-label">
+                Waist
+                <input type="number" id="bodyWaistInput" min="0" step="0.5" placeholder="Inches" />
+              </label>
 
-                <div>
-                  <input type="number" id="modelHeightInchesInput" min="0" max="11" step="0.5" value="8" placeholder="Inches" />
-                  <span class="upload-help">Inches</span>
-                </div>
-              </div>
-              <span class="upload-help">Used to convert size-guide inches into real 3D garment scale.</span>
-            </label>
+              <label class="upload-label">
+                Hip
+                <input type="number" id="bodyHipInput" min="0" step="0.5" placeholder="Inches" />
+              </label>
+            </div>
+
+            <span class="upload-help">The size guide parser recommends the closest size after analysis.</span>
           </article> 
 
           <article class="upload-card featured-upload">
@@ -144,11 +157,6 @@
           </article>
         </div>
 
-        <div class="upload-actions">
-          <button type="button" class="btn primary" id="analyzeButton">Analyze fit</button>
-          <p class="form-status" id="analyzeStatus"></p>
-        </div>
-
         <div class="analysis-results" id="analysisResults"></div>
       </div>
     </section>
@@ -177,24 +185,24 @@
         <article class="audience-card cream-card">
           <p class="eyebrow">Shape-aware</p>
           <h3>Compare size without guessing.</h3>
-          <p>Use body scan data and size-guide uploads to test fit options.</p>
+          <p>Use body measurements and size-guide uploads to test fit options.</p>
         </article>
 
-       <!-- <article class="audience-card closet-card">
-          <span class="closet-label">Digital closet</span>
-          <h3>Upload your real wardrobe.</h3>
-          <p>Store pieces from your closet and reuse them in try-on sessions.</p>
-          <a class="btn secondary" href="#closet">Build closet</a> 
-        </article> -->
       </div>
     </section>
-  <!--
-    <section class="studio-section" id="studio">
-      <div class="section-header split-header">
-         <div class="preview-card">
+
+    <section class="studio-section" id="preview">
+      <div class="section-header clean-header">
+        <p class="eyebrow">Live Preview</p>
+        <h2>Generate the garment, then test sizes.</h2>
+        <p>Enter body measurements, upload a clothing image and size guide, then analyze to get a recommended size.</p>
+      </div>
+
+      <div class="studio-shell">
+        <div class="preview-card">
           <div class="preview-header">
             <div>
-              <span class="preview-kicker">Live fit scan</span>
+              <span class="preview-kicker">Fit recommendation</span>
               <h2>Body-aware preview</h2>
             </div>
             <span class="status-pill">Preview</span>
@@ -204,7 +212,8 @@
             <div id="modelContainer" class="visual-placeholder">
               <div id="previewHint" class="preview-hint">
                 <div>
-                 
+                  <strong>Preview waiting for uploads</strong>
+                  <span>Use the studio controls above to enter measurements, upload a clothing image and size guide, then press Analyze fit.</span>
                 </div>
               </div>
 
@@ -217,11 +226,16 @@
               <h4>Detected sizes</h4>
               <span>Choose a size after analysis</span>
             </div>
-            <div id="sizeButtons" class="size-buttons"></div>
+            <div id="sizeButtons" class="size-buttons">
+              <div class="size-recommendation">
+                <strong>Recommended size appears here</strong>
+                <span>Enter measurements and analyze a size guide to compare against brand sizing.</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </section> -->
+    </section>
 
     <section class="closet-section" id="closet">
       <div class="section-header split-header">
@@ -239,7 +253,7 @@
           </div>
 
           <label class="closet-upload-label">
-            Choose closet images
+            Choose size guide images
             <input type="file" id="closetUpload" accept=".png,.jpg,.jpeg" multiple />
           </label>
         </div>
@@ -247,7 +261,7 @@
         <div class="closet-grid" id="closetGrid">
           <article class="closet-empty">
             <span>No size guides available</span>
-            <p>Upload size guide images to start building your digital library.</p>
+            <p>Upload size guide images to start building your size guide library.</p>
           </article>
         </div>
       </div>
@@ -256,40 +270,19 @@
     <section class="process-section" id="process">
       <div class="section-header clean-header">
         <p class="eyebrow">Coming Soon in Version Two</p>
-        <h2>From closet image to fit preview.</h2>
+        <h2>From size guide to fit preview.</h2>
       </div>
 
       <div class="process-grid">
         <article class="process-card">
-          <span>Scan</span>
-          <h3>Upload your scan</h3>
-          <p>Add a GLB or GLTF body model so the fitting room has a 3D form to work with.</p>
+          <span>Measure</span>
+          <h3>Enter measurements</h3>
+          <p>Add chest, waist, and hip measurements so the size guide can recommend a fit.</p>
         </article>
         <article class="process-card">
-      <!-- <article class="upload-card">
-          <label class="upload-label"> -->
-            <span>Garment</span> 
-           <h3>Insert Your Image</h3> 
-            <!--<input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" /> -->
-            <p>Add the image of the clothing you'd like to see modeled on your body.</p>
-       <!--   </label>
-          <label class="upload-label" style="margin-top: 1rem;">
-            Garment Type
-            <select id="garmentTypeSelect">
-              <option value="shirt">Shirt / Top</option>
-              <option value="dress">Dress</option>
-              <option value="pants">Pants / Trousers</option>
-              <option value="jeans">Jeans / Denim</option>
-              <option value="shorts">Shorts</option>
-              <option value="skirt">Skirt</option>
-              <option value="jacket">Jacket / Coat</option>
-              <option value="hoodie">Hoodie</option>
-              <option value="sweater">Sweater</option>
-              <option value="suit">Suit / Blazer</option>
-              <option value="romper">Romper / Jumpsuit</option>
-            </select>
-            <span class="upload-help">Pick the garment type to guide cutout detection.</span>
-          </label> -->
+          <span>Garment</span> 
+          <h3>Upload clothing</h3> 
+          <p>Add the clothing image you want to compare against the size recommendation.</p>
         </article>
 
         <article class="process-card">
@@ -299,26 +292,6 @@
         </article>
       </div>
     </section>
-
-  <!--  <section class="collection" id="collection">
-      <div class="section-header split-header">
-        <p class="eyebrow">Test collection</p>
-        <h2>Starter garments.</h2>
-        <p>Use these proof-of-concept garments while the fitting experience is being tested.</p>
-      </div>
-
-      <div class="collection-grid">
-        <article class="collection-item">
-          <div class="item-image">
-            <img src="images/basic circle skirt model.png" alt="Circle Skirt" />
-          </div>
-          <div>
-            <span class="collection-tag">Sample model</span>
-            <h3>Circle Skirt</h3>
-          </div>
-        </article>
-      </div>
-    </section> -->
 
     <section class="lead-form" id="contact">
       <div class="section-header clean-header">
@@ -357,7 +330,7 @@
   <script src="vendor/three/three.min.js"></script>
   <script src="vendor/three/GLTFLoader.js"></script>
   <script src="vendor/three/OrbitControls.js"></script>
-  <script src="script.js"></script>
+  <script src="script.js?v=demo-20260524"></script>
 
   <script>
     const closetUpload = document.getElementById("closetUpload");
@@ -380,10 +353,10 @@
 
             item.innerHTML = `
               <div class="closet-image">
-                <img src="${loadEvent.target.result}" alt="Uploaded closet item" />
+                <img src="${loadEvent.target.result}" alt="Uploaded size guide" />
               </div>
               <div class="closet-meta">
-                <span>Closet item</span>
+                <span>Size guide</span>
                 <strong>${file.name.replace(/\.[^/.]+$/, "")}</strong>
               </div>
             `;
