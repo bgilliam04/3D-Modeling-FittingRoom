@@ -9,10 +9,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles.css?v=demo-20260524" />
+  <link rel="stylesheet" href="styles.css?v=demo-20260526-structural-options" />
 </head>
 
-<body class="theme-1">
+<body class="scheme-pearl">
   <aside class="brand-rail">
     <a class="brand" href="#home" aria-label="thatfits home">
       <img src="images/thatfits-logo.png" alt="thatfits logo" class="logo" />
@@ -28,12 +28,12 @@
     </div>
 
     <div class="nav-actions">
-      <select id="themeSwitcher" aria-label="Choose color theme">
-        <option value="theme-1">Soft Editorial</option>
-        <option value="theme-2">Dark Forest</option>
-        <option value="theme-3">Editorial Warm</option>
-        <option value="theme-4">Modern Olive</option>
-        <option value="theme-5">Luxury Dark</option>
+      <select id="themeSwitcher" aria-label="Choose website version">
+        <option value="scheme-pearl">Option 1: Pearl Studio</option>
+        <option value="scheme-vichy">Option 2: Vichy Lab</option>
+        <option value="scheme-cocoa">Option 3: Cocoa Canvas</option>
+        <option value="scheme-terrazzo">Option 4: Terrazzo Index</option>
+        <option value="scheme-amethyst">Option 5: Amethyst Night</option>
       </select>
 
       <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation">Menu</button>
@@ -47,8 +47,9 @@
     </div>
 
     <a href="#home">Home</a>
-    <a href="#studio">Studio</a>
-    <a href="#closet">Size Guides</a>
+    <a href="#options">Design Options</a>
+    <a href="#studio">Fit Studio</a>
+    <a href="#closet">Brand Library</a>
     <a href="#process">How it works</a>
     <a href="#contact">Feedback</a>
   </nav>
@@ -57,14 +58,15 @@
     <section class="hero" id="home">
       <div class="hero-copy">
         <p class="eyebrow">For bodies outside the default size chart</p>
-        <h1>Fit check before checkout.</h1>
+        <h1>Upload. Measure. Match the size.</h1>
         <p class="hero-subtitle">
-          Virtual try-on for shoppers who need better answers around length, curve, proportion, and garment placement before buying.
+          A virtual fitting room that compares your measurements against a size guide and an item picture before you buy.
         </p>
 
         <div class="hero-metrics" aria-label="Fit inputs">
-          <span>Body measurements</span>
-          <span>Brand size guide</span>
+          <span>Upload picture of item</span>
+          <span>Upload size guide</span>
+          <span>Input measurements</span>
           <span>Recommended size</span>
         </div>
 
@@ -76,16 +78,16 @@
 
       <div class="hero-showcase" id="studio">
         <ol class="workflow-strip" aria-label="Fitting workflow">
-          <li><span>1</span> Enter measurements</li>
-          <li><span>2</span> Upload guide</li>
-          <li><span>3</span> Get recommendation</li>
+          <li><span>1</span> Input measurements</li>
+          <li><span>2</span> Upload item &amp; guide</li>
+          <li><span>3</span> Compare sizing</li>
         </ol>
 
         <div class="upload-grid">
           <article class="upload-card">
             <div class="upload-card-header">
               <span>You</span>
-              <h3>Body measurements</h3>
+              <h3>Your measurements</h3>
             </div>
 
             <div class="body-measurement-grid" aria-label="Body measurements in inches">
@@ -106,16 +108,16 @@
             </div>
 
             <span class="upload-help">The size guide parser recommends the closest size after analysis.</span>
-          </article> 
+          </article>
 
           <article class="upload-card featured-upload">
             <div class="upload-card-header">
               <span>Garment</span>
-              <h3>Clothing image</h3>
+              <h3>Item picture</h3>
             </div>
 
             <label class="upload-label">
-              Upload clothing image
+              Item picture
               <input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" />
               <span class="upload-help">Allowed file types: .png, .jpg, .jpeg.</span>
             </label>
@@ -145,7 +147,7 @@
             </div>
 
             <label class="upload-label">
-              Upload size guide image
+              Size guide image
               <input type="file" id="sizeGuideUpload" accept=".png,.jpg,.jpeg" multiple />
               <span class="upload-help">Upload one or more screenshots of the brand’s size chart.</span>
             </label>
@@ -161,31 +163,67 @@
       </div>
     </section>
 
+    <section class="options-section" id="options" aria-label="Website design options">
+      <div class="section-header clean-header">
+        <p class="eyebrow">Five complete directions</p>
+        <h2>Pick a website option, not only a color scheme.</h2>
+        <p>Each option changes the page structure, density, controls, and visual rhythm while keeping the same fitting-room workflow.</p>
+      </div>
+
+      <div class="option-grid">
+        <button class="option-card pearl-option" type="button" data-theme-target="scheme-pearl">
+          <span>Option 1</span>
+          <strong>Pearl Studio</strong>
+          <small>Soft editorial, spacious panels, calm measurement-first flow.</small>
+        </button>
+        <button class="option-card vichy-option" type="button" data-theme-target="scheme-vichy">
+          <span>Option 2</span>
+          <strong>Vichy Lab</strong>
+          <small>Clinical grid, fast scanning, compact upload station.</small>
+        </button>
+        <button class="option-card cocoa-option" type="button" data-theme-target="scheme-cocoa">
+          <span>Option 3</span>
+          <strong>Cocoa Canvas</strong>
+          <small>Bold split canvas, warm product-forward studio.</small>
+        </button>
+        <button class="option-card terrazzo-option" type="button" data-theme-target="scheme-terrazzo">
+          <span>Option 4</span>
+          <strong>Terrazzo Index</strong>
+          <small>Structured index, brand-library emphasis, sharp blocks.</small>
+        </button>
+        <button class="option-card amethyst-option" type="button" data-theme-target="scheme-amethyst">
+          <span>Option 5</span>
+          <strong>Amethyst Night</strong>
+          <small>Dark fitting-room interface with high-contrast actions.</small>
+        </button>
+      </div>
+    </section>
+
     <section class="audience-section" aria-label="Fit priorities">
       <div class="section-header clean-header">
-        <p class="eyebrow">Built for real proportions</p>
-        <h2>Better fit signals before you buy.</h2>
+        <p class="eyebrow">Built for body-type outliers</p>
+        <h2>Designed around fit questions standard charts miss.</h2>
       </div>
 
       <div class="audience-grid">
         <article class="audience-card image-card main-card">
           <div>
             <p class="eyebrow">Length-aware</p>
-            <h3>No more accidental crop tops.</h3>
+            <h3>Check where the item actually lands.</h3>
             <p>Preview sleeve length, inseams, torso placement, and where hems actually land.</p>
           </div>
         </article>
 
         <article class="audience-card soft-card">
           <p class="eyebrow">Proportion-aware</p>
-          <h3>See the silhouette sooner.</h3>
-          <p>Check where shoulders, waists, and seams fall before ordering.</p>
+          <h3>Compare brands that size differently.</h3>
+          <p>Match your measurements against inclusive, tall, petite, curve, maternity, and adaptive ranges.</p>
         </article>
 
         <article class="audience-card cream-card">
           <p class="eyebrow">Shape-aware</p>
-          <h3>Compare size without guessing.</h3>
-          <p>Use body measurements and size-guide uploads to test fit options.</p>
+          <h3>Upload item photos and charts together.</h3>
+          <p>Use the item picture, your measurements, and the size guide in one place.</p>
         </article>
 
       </div>
@@ -193,9 +231,9 @@
 
     <section class="studio-section" id="preview">
       <div class="section-header clean-header">
-        <p class="eyebrow">Live Preview</p>
-        <h2>Generate the garment, then test sizes.</h2>
-        <p>Enter body measurements, upload a clothing image and size guide, then analyze to get a recommended size.</p>
+        <p class="eyebrow">Fit Studio</p>
+        <h2>Upload picture of item &amp; size guide.</h2>
+        <p>Input your measurements, upload the item image, add the size guide, then analyze for a size recommendation.</p>
       </div>
 
       <div class="studio-shell">
@@ -212,8 +250,8 @@
             <div id="modelContainer" class="visual-placeholder">
               <div id="previewHint" class="preview-hint">
                 <div>
-                  <strong>Preview waiting for uploads</strong>
-                  <span>Use the studio controls above to enter measurements, upload a clothing image and size guide, then press Analyze fit.</span>
+                <strong>Preview waiting for item and guide</strong>
+                  <span>Input measurements, upload a picture of the item and its size guide, then press Analyze fit.</span>
                 </div>
               </div>
 
@@ -239,17 +277,17 @@
 
     <section class="closet-section" id="closet">
       <div class="section-header split-header">
-        <p class="eyebrow">Library</p>
-        <h2>Size Guide Library</h2>
-        <p>List of Size Guides from select stores focused on body size outliers</p>
+        <p class="eyebrow">Brand library</p>
+        <h2>Size guide library for body-type outliers.</h2>
+        <p>Typical brands and categories to check when standard size charts do not cover your proportions.</p>
       </div>
 
       <div class="closet-shell">
         <div class="closet-upload-card">
           <div>
             <span class="closet-label">Size guide upload</span>
-            <h3>Add size guides to your library</h3>
-            <p>Upload new guides.</p>
+            <h3>Add a brand size guide</h3>
+            <p>Upload screenshots from any store, then compare them with your measurements and item photo.</p>
           </div>
 
           <label class="closet-upload-label">
@@ -259,9 +297,53 @@
         </div>
 
         <div class="closet-grid" id="closetGrid">
-          <article class="closet-empty">
-            <span>No size guides available</span>
-            <p>Upload size guide images to start building your size guide library.</p>
+          <article class="closet-item brand-card">
+            <div class="closet-image brand-letter">US</div>
+            <div class="closet-meta">
+              <span>Inclusive range</span>
+              <strong>Universal Standard</strong>
+              <p>Useful for extended size ranges and proportion-aware basics.</p>
+            </div>
+          </article>
+          <article class="closet-item brand-card">
+            <div class="closet-image brand-letter">GA</div>
+            <div class="closet-meta">
+              <span>Curve denim</span>
+              <strong>Good American</strong>
+              <p>Useful for curve-focused jeans, stretch, hip, and waist checks.</p>
+            </div>
+          </article>
+          <article class="closet-item brand-card">
+            <div class="closet-image brand-letter">AS</div>
+            <div class="closet-meta">
+              <span>Tall / petite / curve</span>
+              <strong>ASOS fit ranges</strong>
+              <p>Useful for comparing length-specific charts across categories.</p>
+            </div>
+          </article>
+          <article class="closet-item brand-card">
+            <div class="closet-image brand-letter">ON</div>
+            <div class="closet-meta">
+              <span>Budget range</span>
+              <strong>Old Navy</strong>
+              <p>Useful for tall, petite, plus, and everyday garment comparisons.</p>
+            </div>
+          </article>
+          <article class="closet-item brand-card">
+            <div class="closet-image brand-letter">GC</div>
+            <div class="closet-meta">
+              <span>Activewear</span>
+              <strong>Girlfriend Collective</strong>
+              <p>Useful for compression, stretch, bust, waist, and hip ranges.</p>
+            </div>
+          </article>
+          <article class="closet-item brand-card">
+            <div class="closet-image brand-letter">TR</div>
+            <div class="closet-meta">
+              <span>Plus focused</span>
+              <strong>Torrid</strong>
+              <p>Useful for plus-size dresses, denim, tops, and length checks.</p>
+            </div>
           </article>
         </div>
       </div>
@@ -269,26 +351,26 @@
 
     <section class="process-section" id="process">
       <div class="section-header clean-header">
-        <p class="eyebrow">Coming Soon in Version Two</p>
-        <h2>From size guide to fit preview.</h2>
+        <p class="eyebrow">Workflow</p>
+        <h2>From your measurements to a fit recommendation.</h2>
       </div>
 
       <div class="process-grid">
         <article class="process-card">
           <span>Measure</span>
           <h3>Enter measurements</h3>
-          <p>Add chest, waist, and hip measurements so the size guide can recommend a fit.</p>
+          <p>Add chest, waist, and hip measurements so the size guide can recommend a closer fit.</p>
         </article>
         <article class="process-card">
           <span>Garment</span> 
-          <h3>Upload clothing</h3> 
-          <p>Add the clothing image you want to compare against the size recommendation.</p>
+          <h3>Upload item picture &amp; size guide</h3>
+          <p>Add the item image and one or more screenshots of the brand’s size chart.</p>
         </article>
 
         <article class="process-card">
           <span>Fit</span>
-          <h3>Compare sizing</h3>
-          <p>Add a size guide so the system can detect measurements and generate size options.</p>
+          <h3>Compare body-type outlier options</h3>
+          <p>Use the brand library and detected chart measurements to choose the best available size.</p>
         </article>
       </div>
     </section>
@@ -330,7 +412,7 @@
   <script src="vendor/three/three.min.js"></script>
   <script src="vendor/three/GLTFLoader.js"></script>
   <script src="vendor/three/OrbitControls.js"></script>
-  <script src="script.js?v=demo-20260524"></script>
+  <script src="script.js?v=demo-20260526-structural-options"></script>
 
   <script>
     const closetUpload = document.getElementById("closetUpload");

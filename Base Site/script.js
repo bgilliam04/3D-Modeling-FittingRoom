@@ -3,12 +3,24 @@ const siteNav = document.getElementById('siteNav');
 const contactForm = document.getElementById('contactForm');
 const formStatus = document.getElementById('formStatus');
 const themeSwitcher = document.getElementById('themeSwitcher');
+const optionCards = document.querySelectorAll('[data-theme-target]');
 
 if (themeSwitcher) {
   themeSwitcher.addEventListener('change', (e) => {
     document.body.className = e.target.value;
   });
 }
+
+optionCards.forEach((card) => {
+  card.addEventListener('click', () => {
+    const theme = card.getAttribute('data-theme-target');
+    if (!theme) return;
+    document.body.className = theme;
+    if (themeSwitcher) {
+      themeSwitcher.value = theme;
+    }
+  });
+});
 
 if (navToggle && siteNav) {
   navToggle.addEventListener('click', () => {
