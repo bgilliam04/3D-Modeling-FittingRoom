@@ -3,382 +3,304 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>thatfits | Virtual Try-On</title>
+  <title>thatfits | Virtual Fitting Room</title>
+  <link rel="icon" href="data:," />
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles.css?v=demo-20260526-structural-options" />
+  <link rel="stylesheet" href="styles.css?v=fitroom-redesign-20260526" />
 </head>
 
-<body class="scheme-pearl">
-  <aside class="brand-rail">
-    <a class="brand" href="#home" aria-label="thatfits home">
-      <img src="images/thatfits-logo.png" alt="thatfits logo" class="logo" />
+<body>
+  <header class="app-header">
+    <a class="brand-mark" href="#home" aria-label="thatfits home">
+      <span>that</span><span>fits</span>
     </a>
-    <span class="rail-text">fit for every frame</span>
-  </aside>
 
-  <header class="site-header">
-    <div class="topline">
-      <span>Made beyond standard sizing</span>
-      <span>Built around proportions</span>
-      <span>Fit before checkout</span>
-    </div>
+    <nav class="desktop-nav" aria-label="Primary navigation">
+      <a class="active" href="#studio">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21V8a6 6 0 1 1 12 0v13"/><path d="M4 21h16"/><path d="M9 8h6"/></svg>
+        Store fit room
+      </a>
+      <a href="#closet">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5z"/><path d="M9 4v16"/><path d="M15 4v16"/></svg>
+        Size library
+      </a>
+      <a href="#contact">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.2 2.2 0 0 1 4.3.7c0 1.8-2.1 2-2.1 3.7"/><path d="M12 17h.01"/></svg>
+        Help
+      </a>
+    </nav>
 
-    <div class="nav-actions">
-      <select id="themeSwitcher" aria-label="Choose website version">
-        <option value="scheme-pearl">Option 1: Pearl Studio</option>
-        <option value="scheme-vichy">Option 2: Vichy Lab</option>
-        <option value="scheme-cocoa">Option 3: Cocoa Canvas</option>
-        <option value="scheme-terrazzo">Option 4: Terrazzo Index</option>
-        <option value="scheme-amethyst">Option 5: Amethyst Night</option>
-      </select>
-
-      <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation">Menu</button>
+    <div class="header-actions">
+      <a class="header-link" href="#closet">Brand library</a>
+      <a class="btn primary header-cta" href="#studio">
+        Start analysis
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+      </a>
+      <button class="nav-toggle" id="navToggle" type="button" aria-label="Toggle navigation">Menu</button>
     </div>
   </header>
 
-  <nav class="side-nav" id="siteNav">
+  <nav class="side-nav" id="siteNav" aria-label="Mobile navigation">
     <div class="side-nav-header">
-      <span>Explore</span>
-      <small>thatfits studio</small>
+      <div>
+        <span>thatfits</span>
+        <small>Virtual fitting room</small>
+      </div>
+      <button class="nav-close" id="navClose" type="button" aria-label="Close navigation">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>
+      </button>
     </div>
-
-    <a href="#home">Home</a>
-    <a href="#options">Design Options</a>
-    <a href="#studio">Fit Studio</a>
-    <a href="#closet">Brand Library</a>
+    <a href="#studio">Store fit room</a>
+    <a href="#closet">Size library</a>
     <a href="#process">How it works</a>
-    <a href="#contact">Feedback</a>
+    <a href="#contact">Help</a>
   </nav>
 
-  <main class="page-shell">
-    <section class="hero" id="home">
-      <div class="hero-copy">
-        <p class="eyebrow">For bodies outside the default size chart</p>
-        <h1>Upload. Measure. Match the size.</h1>
-        <p class="hero-subtitle">
-          A virtual fitting room that compares your measurements against a size guide and an item picture before you buy.
-        </p>
-
-        <div class="hero-metrics" aria-label="Fit inputs">
-          <span>Upload picture of item</span>
-          <span>Upload size guide</span>
-          <span>Input measurements</span>
-          <span>Recommended size</span>
+  <main id="home">
+    <section class="fit-workspace" id="studio" aria-label="Virtual fitting room">
+      <aside class="workflow-panel" aria-label="Fit inputs">
+        <div class="panel-title">
+          <p>Virtual fitting room</p>
+          <h1>Shop by fit, not by guessing.</h1>
         </div>
 
-        <div class="hero-actions">
-          <a class="btn primary" href="#studio">Start fitting</a>
-          <a class="btn secondary" href="#closet">Size guide library</a>
-        </div>
-      </div>
-
-      <div class="hero-showcase" id="studio">
-        <ol class="workflow-strip" aria-label="Fitting workflow">
-          <li><span>1</span> Input measurements</li>
-          <li><span>2</span> Upload item &amp; guide</li>
-          <li><span>3</span> Compare sizing</li>
-        </ol>
-
-        <div class="upload-grid">
-          <article class="upload-card">
-            <div class="upload-card-header">
-              <span>You</span>
-              <h3>Your measurements</h3>
-            </div>
-
-            <div class="body-measurement-grid" aria-label="Body measurements in inches">
-              <label class="upload-label">
-                Chest / bust
-                <input type="number" id="bodyChestInput" min="0" step="0.5" placeholder="Inches" />
-              </label>
-
-              <label class="upload-label">
-                Waist
-                <input type="number" id="bodyWaistInput" min="0" step="0.5" placeholder="Inches" />
-              </label>
-
-              <label class="upload-label">
-                Hip
-                <input type="number" id="bodyHipInput" min="0" step="0.5" placeholder="Inches" />
-              </label>
-            </div>
-
-            <span class="upload-help">The size guide parser recommends the closest size after analysis.</span>
-          </article>
-
-          <article class="upload-card featured-upload">
-            <div class="upload-card-header">
-              <span>Garment</span>
-              <h3>Item picture</h3>
-            </div>
-
-            <label class="upload-label">
-              Item picture
-              <input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" />
-              <span class="upload-help">Allowed file types: .png, .jpg, .jpeg.</span>
-            </label>
-
-            <label class="upload-label">
-              Garment type
-              <select id="garmentTypeSelect">
-                <option value="shirt">Shirt / Top</option>
-                <option value="dress">Dress</option>
-                <option value="pants">Pants / Trousers</option>
-                <option value="shorts">Shorts</option>
-                <option value="skirt">Skirt</option>
-                <option value="jacket">Jacket / Coat</option>
-                <option value="hoodie">Hoodie</option>
-                <option value="sweater">Sweater</option>
-                <option value="suit">Suit / Blazer</option>
-                <option value="romper">Romper / Jumpsuit</option>
-              </select>
-              <span class="upload-help">Pick the garment type to guide cutout detection.</span>
-            </label>
-          </article>
-
-          <article class="upload-card">
-            <div class="upload-card-header">
-              <span>Guide</span>
-              <h3>Size guide</h3>
-            </div>
-
-            <label class="upload-label">
-              Size guide image
-              <input type="file" id="sizeGuideUpload" accept=".png,.jpg,.jpeg" multiple />
-              <span class="upload-help">Upload one or more screenshots of the brand’s size chart.</span>
-            </label>
-          </article>
-        </div>
-
-        <div class="upload-actions">
-          <p class="form-status" id="analyzeStatus"></p>
-          <button type="button" class="btn primary" id="analyzeButton">Analyze fit</button>
-        </div>
-
-        <div class="analysis-results" id="analysisResults"></div>
-      </div>
-    </section>
-
-    <section class="options-section" id="options" aria-label="Website design options">
-      <div class="section-header clean-header">
-        <p class="eyebrow">Five complete directions</p>
-        <h2>Pick a website option, not only a color scheme.</h2>
-        <p>Each option changes the page structure, density, controls, and visual rhythm while keeping the same fitting-room workflow.</p>
-      </div>
-
-      <div class="option-grid">
-        <button class="option-card pearl-option" type="button" data-theme-target="scheme-pearl">
-          <span>Option 1</span>
-          <strong>Pearl Studio</strong>
-          <small>Soft editorial, spacious panels, calm measurement-first flow.</small>
-        </button>
-        <button class="option-card vichy-option" type="button" data-theme-target="scheme-vichy">
-          <span>Option 2</span>
-          <strong>Vichy Lab</strong>
-          <small>Clinical grid, fast scanning, compact upload station.</small>
-        </button>
-        <button class="option-card cocoa-option" type="button" data-theme-target="scheme-cocoa">
-          <span>Option 3</span>
-          <strong>Cocoa Canvas</strong>
-          <small>Bold split canvas, warm product-forward studio.</small>
-        </button>
-        <button class="option-card terrazzo-option" type="button" data-theme-target="scheme-terrazzo">
-          <span>Option 4</span>
-          <strong>Terrazzo Index</strong>
-          <small>Structured index, brand-library emphasis, sharp blocks.</small>
-        </button>
-        <button class="option-card amethyst-option" type="button" data-theme-target="scheme-amethyst">
-          <span>Option 5</span>
-          <strong>Amethyst Night</strong>
-          <small>Dark fitting-room interface with high-contrast actions.</small>
-        </button>
-      </div>
-    </section>
-
-    <section class="audience-section" aria-label="Fit priorities">
-      <div class="section-header clean-header">
-        <p class="eyebrow">Built for body-type outliers</p>
-        <h2>Designed around fit questions standard charts miss.</h2>
-      </div>
-
-      <div class="audience-grid">
-        <article class="audience-card image-card main-card">
-          <div>
-            <p class="eyebrow">Length-aware</p>
-            <h3>Check where the item actually lands.</h3>
-            <p>Preview sleeve length, inseams, torso placement, and where hems actually land.</p>
-          </div>
-        </article>
-
-        <article class="audience-card soft-card">
-          <p class="eyebrow">Proportion-aware</p>
-          <h3>Compare brands that size differently.</h3>
-          <p>Match your measurements against inclusive, tall, petite, curve, maternity, and adaptive ranges.</p>
-        </article>
-
-        <article class="audience-card cream-card">
-          <p class="eyebrow">Shape-aware</p>
-          <h3>Upload item photos and charts together.</h3>
-          <p>Use the item picture, your measurements, and the size guide in one place.</p>
-        </article>
-
-      </div>
-    </section>
-
-    <section class="studio-section" id="preview">
-      <div class="section-header clean-header">
-        <p class="eyebrow">Fit Studio</p>
-        <h2>Upload picture of item &amp; size guide.</h2>
-        <p>Input your measurements, upload the item image, add the size guide, then analyze for a size recommendation.</p>
-      </div>
-
-      <div class="studio-shell">
-        <div class="preview-card">
-          <div class="preview-header">
+        <article class="input-group measurement-card">
+          <div class="group-header">
             <div>
-              <span class="preview-kicker">Fit recommendation</span>
-              <h2>Body-aware preview</h2>
+              <span class="step-number">01</span>
+              <h2>Your measurements</h2>
             </div>
-            <span class="status-pill">Preview</span>
+            <button class="unit-toggle" type="button" aria-label="Measurements are in inches">
+              <span>in</span>
+            </button>
           </div>
 
-          <div class="preview-frame">
-            <div id="modelContainer" class="visual-placeholder">
-              <div id="previewHint" class="preview-hint">
-                <div>
+          <div class="body-measurement-grid" aria-label="Body measurements in inches">
+            <label class="field-row">
+              <span>Chest / bust</span>
+              <input type="number" id="bodyChestInput" min="0" step="0.5" placeholder="42" />
+              <small>in</small>
+            </label>
+
+            <label class="field-row">
+              <span>Waist</span>
+              <input type="number" id="bodyWaistInput" min="0" step="0.5" placeholder="34" />
+              <small>in</small>
+            </label>
+
+            <label class="field-row">
+              <span>Hip</span>
+              <input type="number" id="bodyHipInput" min="0" step="0.5" placeholder="44" />
+              <small>in</small>
+            </label>
+          </div>
+        </article>
+
+        <article class="input-group garment-card">
+          <div class="group-header">
+            <div>
+              <span class="step-number">02</span>
+              <h2>Garment type</h2>
+            </div>
+          </div>
+
+          <label class="select-field">
+            <span>Category</span>
+            <select id="garmentTypeSelect">
+              <option value="shirt">Shirt / Top</option>
+              <option value="dress">Dress</option>
+              <option value="pants">Pants / Trousers</option>
+              <option value="shorts">Shorts</option>
+              <option value="skirt">Skirt</option>
+              <option value="jacket">Jacket / Coat</option>
+              <option value="hoodie">Hoodie</option>
+              <option value="sweater">Sweater</option>
+              <option value="suit">Suit / Blazer</option>
+              <option value="romper">Romper / Jumpsuit</option>
+            </select>
+          </label>
+        </article>
+
+        <article class="input-group upload-card">
+          <div class="group-header">
+            <div>
+              <span class="step-number">03</span>
+              <h2>Item photo</h2>
+            </div>
+            <span class="ready-dot">Ready</span>
+          </div>
+
+          <label class="file-drop">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V5"/><path d="m7 10 5-5 5 5"/><path d="M5 19h14"/></svg>
+            <span>Upload garment image</span>
+            <small>.png, .jpg, .jpeg</small>
+            <input type="file" id="clothingUpload" accept=".png,.jpg,.jpeg" />
+          </label>
+        </article>
+
+        <article class="input-group upload-card">
+          <div class="group-header">
+            <div>
+              <span class="step-number">04</span>
+              <h2>Size guide</h2>
+            </div>
+          </div>
+
+          <label class="file-drop compact">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8"/><path d="M8 13h8"/><path d="M8 17h4"/></svg>
+            <span>Add chart screenshots</span>
+            <small>Upload one or more brand size charts.</small>
+            <input type="file" id="sizeGuideUpload" accept=".png,.jpg,.jpeg" multiple />
+          </label>
+        </article>
+
+        <div class="analyze-bar">
+          <p class="form-status" id="analyzeStatus" aria-live="polite">Ready to analyze once uploads are added.</p>
+          <button type="button" class="btn primary analyze-button" id="analyzeButton">
+            Analyze fit
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+          </button>
+        </div>
+      </aside>
+
+      <section class="preview-stage" aria-label="Fit preview">
+        <div class="status-card">
+          <span></span>
+          <div>
+            <strong>Ready to analyze</strong>
+            <small>Upload the item and size guide, then compare sizing.</small>
+          </div>
+        </div>
+
+        <div class="preview-frame">
+          <div id="modelContainer" class="visual-placeholder">
+            <div id="previewHint" class="preview-hint">
+              <div class="hint-figure" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+              <div>
                 <strong>Preview waiting for item and guide</strong>
-                  <span>Input measurements, upload a picture of the item and its size guide, then press Analyze fit.</span>
-                </div>
+                <span>The fit model appears here after analysis.</span>
               </div>
-
-              <img id="clothingOverlay" class="clothing-overlay" alt="Clothing overlay" hidden />
             </div>
+
+            <img id="clothingOverlay" class="clothing-overlay" alt="Clothing overlay" hidden />
+          </div>
+        </div>
+
+        <div class="preview-tools" aria-label="Preview tools">
+          <button type="button" aria-label="Zoom in">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M11 8v6"/><path d="M8 11h6"/><path d="m16 16 4 4"/></svg>
+          </button>
+          <button type="button" aria-label="Zoom out">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M8 11h6"/><path d="m16 16 4 4"/></svg>
+          </button>
+        </div>
+      </section>
+
+      <aside class="results-panel" aria-label="Fit recommendation">
+        <div class="recommendation-card">
+          <h2>Recommended size</h2>
+          <div class="size-callout">
+            <strong id="sizeCalloutLabel">--</strong>
+            <span id="sizeCalloutSubcopy">Waiting for chart</span>
           </div>
 
-          <div class="size-guide-panel">
-            <div class="panel-heading">
-              <h4>Detected sizes</h4>
-              <span>Choose a size after analysis</span>
-            </div>
-            <div id="sizeButtons" class="size-buttons">
-              <div class="size-recommendation">
-                <strong>Recommended size appears here</strong>
-                <span>Enter measurements and analyze a size guide to compare against brand sizing.</span>
-              </div>
+          <div id="sizeButtons" class="size-buttons">
+            <div class="size-recommendation">
+              <strong>Recommended size appears here</strong>
+              <span>Enter measurements and analyze a size guide to compare against brand sizing.</span>
             </div>
           </div>
         </div>
-      </div>
+
+        <div class="fit-notes">
+          <h3>Fit notes</h3>
+          <ul>
+            <li><span></span> Chest, waist, and hip are compared when rows are detected.</li>
+            <li><span></span> Garment preview updates when the item image is processed.</li>
+            <li><span></span> Choose detected sizes to inspect alternate fits.</li>
+          </ul>
+        </div>
+
+        <div class="analysis-card">
+          <div class="card-label">Analysis detail</div>
+          <div class="analysis-results" id="analysisResults">
+            Analysis summaries will appear after you run the fit check.
+          </div>
+        </div>
+
+        <div class="support-card">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13a8 8 0 0 1 16 0"/><path d="M5 13v4a2 2 0 0 0 2 2h1v-8H7a2 2 0 0 0-2 2Z"/><path d="M19 13v4a2 2 0 0 1-2 2h-1v-8h1a2 2 0 0 1 2 2Z"/><path d="M12 21h3"/></svg>
+          <div>
+            <strong>Need help?</strong>
+            <span>Save the result or compare another chart.</span>
+          </div>
+        </div>
+      </aside>
     </section>
 
-    <section class="closet-section" id="closet">
-      <div class="section-header split-header">
-        <p class="eyebrow">Brand library</p>
-        <h2>Size guide library for body-type outliers.</h2>
-        <p>Typical brands and categories to check when standard size charts do not cover your proportions.</p>
+    <section class="brand-library" id="closet" aria-label="Brand library">
+      <div class="library-copy">
+        <h2>Brand library</h2>
+        <p>Your saved brands and size charts stay ready for the next shopping tab.</p>
       </div>
 
-      <div class="closet-shell">
-        <div class="closet-upload-card">
-          <div>
-            <span class="closet-label">Size guide upload</span>
-            <h3>Add a brand size guide</h3>
-            <p>Upload screenshots from any store, then compare them with your measurements and item photo.</p>
-          </div>
-
-          <label class="closet-upload-label">
-            Choose size guide images
-            <input type="file" id="closetUpload" accept=".png,.jpg,.jpeg" multiple />
-          </label>
-        </div>
-
-        <div class="closet-grid" id="closetGrid">
-          <article class="closet-item brand-card">
-            <div class="closet-image brand-letter">US</div>
-            <div class="closet-meta">
-              <span>Inclusive range</span>
-              <strong>Universal Standard</strong>
-              <p>Useful for extended size ranges and proportion-aware basics.</p>
-            </div>
-          </article>
-          <article class="closet-item brand-card">
-            <div class="closet-image brand-letter">GA</div>
-            <div class="closet-meta">
-              <span>Curve denim</span>
-              <strong>Good American</strong>
-              <p>Useful for curve-focused jeans, stretch, hip, and waist checks.</p>
-            </div>
-          </article>
-          <article class="closet-item brand-card">
-            <div class="closet-image brand-letter">AS</div>
-            <div class="closet-meta">
-              <span>Tall / petite / curve</span>
-              <strong>ASOS fit ranges</strong>
-              <p>Useful for comparing length-specific charts across categories.</p>
-            </div>
-          </article>
-          <article class="closet-item brand-card">
-            <div class="closet-image brand-letter">ON</div>
-            <div class="closet-meta">
-              <span>Budget range</span>
-              <strong>Old Navy</strong>
-              <p>Useful for tall, petite, plus, and everyday garment comparisons.</p>
-            </div>
-          </article>
-          <article class="closet-item brand-card">
-            <div class="closet-image brand-letter">GC</div>
-            <div class="closet-meta">
-              <span>Activewear</span>
-              <strong>Girlfriend Collective</strong>
-              <p>Useful for compression, stretch, bust, waist, and hip ranges.</p>
-            </div>
-          </article>
-          <article class="closet-item brand-card">
-            <div class="closet-image brand-letter">TR</div>
-            <div class="closet-meta">
-              <span>Plus focused</span>
-              <strong>Torrid</strong>
-              <p>Useful for plus-size dresses, denim, tops, and length checks.</p>
-            </div>
-          </article>
-        </div>
+      <div class="closet-grid" id="closetGrid">
+        <article class="closet-item brand-card">
+          <strong>Acne Studios</strong>
+          <span>3 items</span>
+          <small>Last used 2d ago</small>
+        </article>
+        <article class="closet-item brand-card">
+          <strong>Reformation</strong>
+          <span>2 items</span>
+          <small>Last used 5d ago</small>
+        </article>
+        <article class="closet-item brand-card">
+          <strong>COS</strong>
+          <span>4 items</span>
+          <small>Last used 1w ago</small>
+        </article>
+        <article class="closet-item brand-card">
+          <strong>A.P.C.</strong>
+          <span>2 items</span>
+          <small>Last used 2w ago</small>
+        </article>
       </div>
+
+      <label class="add-brand">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        Add brand
+        <input type="file" id="closetUpload" accept=".png,.jpg,.jpeg" multiple />
+      </label>
     </section>
 
     <section class="process-section" id="process">
-      <div class="section-header clean-header">
-        <p class="eyebrow">Workflow</p>
-        <h2>From your measurements to a fit recommendation.</h2>
-      </div>
-
-      <div class="process-grid">
-        <article class="process-card">
-          <span>Measure</span>
-          <h3>Enter measurements</h3>
-          <p>Add chest, waist, and hip measurements so the size guide can recommend a closer fit.</p>
-        </article>
-        <article class="process-card">
-          <span>Garment</span> 
-          <h3>Upload item picture &amp; size guide</h3>
-          <p>Add the item image and one or more screenshots of the brand’s size chart.</p>
-        </article>
-
-        <article class="process-card">
-          <span>Fit</span>
-          <h3>Compare body-type outlier options</h3>
-          <p>Use the brand library and detected chart measurements to choose the best available size.</p>
-        </article>
-      </div>
+      <article>
+        <span>Measure</span>
+        <h2>Enter the numbers you actually shop with.</h2>
+        <p>Chest, waist, and hip inputs are checked against chart rows the parser can read.</p>
+      </article>
+      <article>
+        <span>Upload</span>
+        <h2>Use the same item photo and size guide from the store page.</h2>
+        <p>The fitting room keeps the item, chart, and recommendation in one workspace.</p>
+      </article>
+      <article>
+        <span>Compare</span>
+        <h2>Review the best size before checkout.</h2>
+        <p>Detected sizes become selectable so you can compare alternatives without starting over.</p>
+      </article>
     </section>
 
     <section class="lead-form" id="contact">
-      <div class="section-header clean-header">
-        <p class="eyebrow">Feedback</p>
-        <h2>Shape the next fitting experience.</h2>
+      <div>
+        <h2>Help improve the fit room.</h2>
         <p>Send comments, issues, or ideas for improving the try-on flow.</p>
       </div>
 
@@ -398,21 +320,21 @@
           <textarea name="message" rows="4" placeholder="What should we improve?"></textarea>
         </label>
 
-        <button type="submit" class="btn primary">Send feedback</button>
+        <button type="submit" class="btn secondary">Send feedback</button>
         <p class="form-status" id="formStatus"></p>
       </form>
     </section>
-
-    <footer class="site-footer">
-      <p>2026 thatfits. Built by students for Start Up Term.</p>
-      <p>Built using GenAI. This should never be sold for commercial purposes (that would have problems of potential plagiarism and is just generally unethical).</p>
-    </footer>
   </main>
+
+  <footer class="site-footer">
+    <p>2026 thatfits. Built by students for Start Up Term.</p>
+    <p>Built using GenAI. This should never be sold for commercial purposes.</p>
+  </footer>
 
   <script src="vendor/three/three.min.js"></script>
   <script src="vendor/three/GLTFLoader.js"></script>
   <script src="vendor/three/OrbitControls.js"></script>
-  <script src="script.js?v=demo-20260526-structural-options"></script>
+  <script src="script.js?v=fitroom-redesign-20260526"></script>
 
   <script>
     const closetUpload = document.getElementById("closetUpload");
@@ -423,30 +345,15 @@
         const files = Array.from(event.target.files);
         if (!files.length) return;
 
-        const emptyState = closetGrid.querySelector(".closet-empty");
-        if (emptyState) emptyState.remove();
-
         files.forEach((file) => {
-          const reader = new FileReader();
-
-          reader.onload = (loadEvent) => {
-            const item = document.createElement("article");
-            item.className = "closet-item";
-
-            item.innerHTML = `
-              <div class="closet-image">
-                <img src="${loadEvent.target.result}" alt="Uploaded size guide" />
-              </div>
-              <div class="closet-meta">
-                <span>Size guide</span>
-                <strong>${file.name.replace(/\.[^/.]+$/, "")}</strong>
-              </div>
-            `;
-
-            closetGrid.appendChild(item);
-          };
-
-          reader.readAsDataURL(file);
+          const item = document.createElement("article");
+          item.className = "closet-item brand-card uploaded-guide";
+          item.innerHTML = `
+            <strong>${file.name.replace(/\.[^/.]+$/, "")}</strong>
+            <span>Size guide</span>
+            <small>Added just now</small>
+          `;
+          closetGrid.appendChild(item);
         });
 
         closetUpload.value = "";

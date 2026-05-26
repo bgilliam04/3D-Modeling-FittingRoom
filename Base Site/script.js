@@ -1,5 +1,6 @@
 ﻿const navToggle = document.getElementById('navToggle');
 const siteNav = document.getElementById('siteNav');
+const navClose = document.getElementById('navClose');
 const contactForm = document.getElementById('contactForm');
 const formStatus = document.getElementById('formStatus');
 const themeSwitcher = document.getElementById('themeSwitcher');
@@ -25,6 +26,12 @@ optionCards.forEach((card) => {
 if (navToggle && siteNav) {
   navToggle.addEventListener('click', () => {
     siteNav.classList.toggle('open');
+  });
+}
+
+if (navClose && siteNav) {
+  navClose.addEventListener('click', () => {
+    siteNav.classList.remove('open');
   });
 }
 
@@ -66,6 +73,8 @@ const analyzeStatus = document.getElementById('analyzeStatus');
 const modelContainer = document.getElementById('modelContainer');
 const clothingOverlay = document.getElementById('clothingOverlay');
 const sizeButtons = document.getElementById('sizeButtons');
+const sizeCalloutLabel = document.getElementById('sizeCalloutLabel');
+const sizeCalloutSubcopy = document.getElementById('sizeCalloutSubcopy');
 const previewHint = document.getElementById('previewHint');
 const BACKEND_URL = 'http://localhost:4000';
 const THREE_LIB = window.THREE || window.three || null;
@@ -717,7 +726,7 @@ function applyBodyConformingDeformationToGarment(modelSize, fitProfile, sizeGuid
 
 function setPreviewBackground(hasModel = false) {
   if (!scene || !THREE_LIB) return;
-  scene.background = new THREE_LIB.Color(hasModel ? 0xc4c4c4 : 0x070b13);
+  scene.background = new THREE_LIB.Color(hasModel ? 0xf1f4f2 : 0xf1f4f2);
 }
 
 function ensureDebugPanel() {
@@ -3884,6 +3893,8 @@ function renderRecommendedSize(recommendation, bodyMeasurements) {
 
   const hasAnyMeasurement = ['chest', 'waist', 'hip'].some((key) => Number.isFinite(Number(bodyMeasurements?.[key])));
   if (!hasAnyMeasurement) {
+    if (sizeCalloutLabel) sizeCalloutLabel.textContent = '--';
+    if (sizeCalloutSubcopy) sizeCalloutSubcopy.textContent = 'Measurements needed';
     panel.innerHTML = `
       <strong>Recommendation needs measurements</strong>
       <span>Enter chest, waist, or hip measurements above to recommend a size from this guide.</span>
@@ -3893,6 +3904,8 @@ function renderRecommendedSize(recommendation, bodyMeasurements) {
   }
 
   if (!recommendation) {
+    if (sizeCalloutLabel) sizeCalloutLabel.textContent = '--';
+    if (sizeCalloutSubcopy) sizeCalloutSubcopy.textContent = 'No matching rows';
     panel.innerHTML = `
       <strong>No matching body-measurement rows found</strong>
       <span>This guide parsed sizes, but not chest, waist, hip, or width rows that can be compared to your inputs.</span>
@@ -3905,6 +3918,9 @@ function renderRecommendedSize(recommendation, bodyMeasurements) {
     .slice(0, 3)
     .map((entry) => `${entry.label}: ${entry.chartValue}"`)
     .join(' · ');
+
+  if (sizeCalloutLabel) sizeCalloutLabel.textContent = recommendation.sizeLabel;
+  if (sizeCalloutSubcopy) sizeCalloutSubcopy.textContent = 'Best chart match';
 
   panel.innerHTML = `
     <strong>Recommended size: ${recommendation.sizeLabel}</strong>
